@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "highrise.bot"
+version = "3.1.0"
+description = "Production-oriented Python Highrise bot SDK"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "websockets>=16.1.1",
+    "httpx>=0.28.1",
+    "orjson>=3.10.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio"]
