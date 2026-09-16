@@ -31,7 +31,8 @@ class PlayerMixin:
         def build() -> dict:
             Validator.required(emote_id, "emote_id")
             Validator.string(emote_id, "emote_id")
-            Validator.string(target_user_id, "target_user_id")
+            if target_user_id:
+                Validator.string(target_user_id, "target_user_id")
 
             request = EmoteRequest(emote_id=emote_id, target_user_id=target_user_id)
             return request.to_dict()
