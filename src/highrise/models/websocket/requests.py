@@ -6,11 +6,13 @@ from .highrise_models import (
     RoomPermissions,
     OutfitItem,
     AnchorPosition,
-    Position
+    Position,
 )
 
+
 def _base_payload(type_name: str) -> dict[str, Any]:
-    return { "_type": type_name } 
+    return {"_type": type_name}
+
 
 @dataclass(frozen=True, slots=True)
 class ChatRequest:
@@ -23,6 +25,7 @@ class ChatRequest:
             payload["whisper_target_id"] = self.whisper_target_id
         return payload
 
+
 @dataclass(frozen=True, slots=True)
 class ChannelRequest:
     message: str
@@ -34,6 +37,7 @@ class ChannelRequest:
             "message": self.message,
             "tags": self.tags,
         }
+
 
 @dataclass(frozen=True, slots=True)
 class SendMessageRequest:
@@ -59,6 +63,7 @@ class SendMessageRequest:
             payload["conversation_id"] = self.conversation_id
         return payload
 
+
 @dataclass(frozen=True, slots=True)
 class LeaveConversationRequest:
     conversation_id: str
@@ -68,6 +73,7 @@ class LeaveConversationRequest:
             "_type": "LeaveConversationRequest",
             "conversation_id": self.conversation_id,
         }
+
 
 @dataclass(frozen=True, slots=True)
 class GetMessagesRequest:
@@ -81,6 +87,7 @@ class GetMessagesRequest:
             "last_message_id": self.last_message_id,
         }
 
+
 @dataclass(frozen=True, slots=True)
 class GetConversationsRequest:
     not_joined: bool = False
@@ -92,22 +99,27 @@ class GetConversationsRequest:
             "not_joined": self.not_joined,
             "last_id": self.last_id,
         }
-    
+
+
 @dataclass(frozen=True, slots=True)
 class EmoteRequest:
     emote_id: str
-    target_user_id: str
+    target_user_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "_type": "EmoteRequest",
             "emote_id": self.emote_id,
-            "target_user_id": self.target_user_id,
         }
+        if self.target_user_id is not None:
+            payload["target_user_id"] = self.target_user_id
+        return payload
+
 
 @dataclass(frozen=True, slots=True)
 class AnchorHitRequest:
     """Move the bot to the given anchor position."""
+
     anchor: AnchorPosition
 
     def to_dict(self) -> dict[str, Any]:
@@ -119,9 +131,11 @@ class AnchorHitRequest:
             },
         }
 
+
 @dataclass(frozen=True, slots=True)
 class TeleportRequest:
     """Move a user to the given floor position."""
+
     user_id: str
     destination: Position
 
@@ -138,9 +152,11 @@ class TeleportRequest:
             },
         }
 
+
 @dataclass(frozen=True, slots=True)
 class FloorHitRequest:
     """Move the bot to the given floor destination."""
+
     destination: Position
 
     def to_dict(self) -> dict[str, Any]:
@@ -155,9 +171,11 @@ class FloorHitRequest:
             },
         }
 
+
 @dataclass(frozen=True, slots=True)
 class ModerateRoomRequest:
     """Moderate a user in the room: kick, ban, unban, or mute."""
+
     user_id: str
     moderation_action: ModerationType
     action_length: int | None = None
@@ -170,9 +188,11 @@ class ModerateRoomRequest:
             "action_length": self.action_length,
         }
 
+
 @dataclass(frozen=True, slots=True)
 class TipUserRequest:
     """Tip a user with a gold bar amount."""
+
     user_id: str
     gold_bar: TipType
 
@@ -183,9 +203,11 @@ class TipUserRequest:
             "gold_bar": self.gold_bar,
         }
 
+
 @dataclass(frozen=True, slots=True)
 class GetUserOutfitRequest:
     """Fetch the outfit for a user."""
+
     user_id: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -194,10 +216,12 @@ class GetUserOutfitRequest:
             "user_id": self.user_id,
         }
 
+
 @dataclass(frozen=True, slots=True)
 class MoveUserToRoomRequest:
     """Move a user to a different room. Only works if the bot belongs
     to the owner of the target room, or has designer privileges."""
+
     user_id: str
     room_id: str
 
@@ -208,12 +232,14 @@ class MoveUserToRoomRequest:
             "room_id": self.room_id,
         }
 
+
 @dataclass(frozen=True, slots=True)
 class GetRoomUsersRequest:
     """Fetch the list of users currently in the room, with their positions."""
 
     def to_dict(self) -> dict[str, Any]:
         return {"_type": "GetRoomUsersRequest"}
+
 
 @dataclass(frozen=True, slots=True)
 class CheckVoiceChatRequest:
@@ -222,9 +248,11 @@ class CheckVoiceChatRequest:
     def to_dict(self) -> dict[str, Any]:
         return {"_type": "CheckVoiceChatRequest"}
 
+
 @dataclass(frozen=True, slots=True)
 class InviteSpeakerRequest:
     """Add a user to voice chat."""
+
     user_id: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -233,9 +261,11 @@ class InviteSpeakerRequest:
             "user_id": self.user_id,
         }
 
+
 @dataclass(frozen=True, slots=True)
 class RemoveSpeakerRequest:
     """Remove a user from voice chat."""
+
     user_id: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -244,9 +274,11 @@ class RemoveSpeakerRequest:
             "user_id": self.user_id,
         }
 
+
 @dataclass(frozen=True, slots=True)
 class GetRoomPrivilegeRequest:
     """Fetch the room privilege for a given user."""
+
     user_id: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -255,9 +287,11 @@ class GetRoomPrivilegeRequest:
             "user_id": self.user_id,
         }
 
+
 @dataclass(frozen=True, slots=True)
 class ChangeRoomPrivilegeRequest:
     """Change the room privilege for a given user."""
+
     user_id: str
     permissions: RoomPermissions
 
@@ -271,6 +305,7 @@ class ChangeRoomPrivilegeRequest:
             },
         }
 
+
 @dataclass(frozen=True, slots=True)
 class GetWalletRequest:
     """Fetch the bot's wallet."""
@@ -278,9 +313,11 @@ class GetWalletRequest:
     def to_dict(self) -> dict[str, Any]:
         return {"_type": "GetWalletRequest"}
 
+
 @dataclass(frozen=True, slots=True)
 class BuyItemRequest:
     """Buy an item."""
+
     item_id: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -289,6 +326,7 @@ class BuyItemRequest:
             "item_id": self.item_id,
         }
 
+
 @dataclass(frozen=True, slots=True)
 class GetInventoryRequest:
     """Get the bot's inventory."""
@@ -296,9 +334,11 @@ class GetInventoryRequest:
     def to_dict(self) -> dict[str, Any]:
         return {"_type": "GetInventoryRequest"}
 
+
 @dataclass(frozen=True, slots=True)
 class SetOutfitRequest:
     """Set the outfit of a bot."""
+
     outfit: list[OutfitItem]
 
     def to_dict(self) -> dict[str, Any]:
@@ -315,3 +355,36 @@ class SetOutfitRequest:
                 for item in self.outfit
             ],
         }
+
+
+# Keep backward compatibility for older imports.
+__all__ = [
+    "ChatRequest",
+    "ChannelRequest",
+    "SendMessageRequest",
+    "LeaveConversationRequest",
+    "GetMessagesRequest",
+    "GetConversationsRequest",
+    "EmoteRequest",
+    "AnchorHitRequest",
+    "TeleportRequest",
+    "FloorHitRequest",
+    "ModerateRoomRequest",
+    "TipUserRequest",
+    "GetUserOutfitRequest",
+    "MoveUserToRoomRequest",
+    "GetRoomUsersRequest",
+    "CheckVoiceChatRequest",
+    "InviteSpeakerRequest",
+    "RemoveSpeakerRequest",
+    "GetRoomPrivilegeRequest",
+    "ChangeRoomPrivilegeRequest",
+    "GetWalletRequest",
+    "BuyItemRequest",
+    "GetInventoryRequest",
+    "SetOutfitRequest",
+]
+
+
+# Legacy alias kept for older call sites.
+BasePayload = _base_payload

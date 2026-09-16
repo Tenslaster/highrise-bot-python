@@ -1,6 +1,7 @@
 import inspect
 from typing import Any
 from collections.abc import Coroutine, Callable
+
 from websockets import State
 
 from .highrise_api import HighriseApi
@@ -21,6 +22,7 @@ from .core.bot_connection_manager import ConnectionManager
 from .core.bot_task_manager import TaskManager
 
 from .models.websocket.highrise_models import *
+
 
 class BaseBot(BotHooks):
     """A base class for Highrise bots.
@@ -105,9 +107,11 @@ class BaseBot(BotHooks):
     def loop(self, seconds: float):
         """Registers a function to run automatically on a repeating
         interval for as long as the bot is connected."""
+
         def decorator(func: Callable[[], Coroutine[Any, Any, None]] = None):
             self._tasks.register_loop(seconds, func)
             return func
+
         return decorator
 
     # -- Properties
@@ -116,6 +120,30 @@ class BaseBot(BotHooks):
     def session_metadata(self) -> "SessionMetadata | None":
         """The session metadata received once connected, or None before then."""
         return self._context.session_metadata
+
+    @property
+    def my_id(self) -> str | None:
+        metadata = self.session_metadata
+        return metadata.user_id if metadata is not None else None
+
+    @property
+    def bot_id(self) -> str | None:
+        return self.my_id
+
+    @property
+    def bot_user_id(self) -> str | None:
+        return self.my_id
+
+    @property
+    def user_id(self) -> str | None:
+        return self.my_id
+
+    @property
+    def me(self) -> User | None:
+        user_id = self.my_id
+        if user_id is None:
+            return None
+        return User(id=user_id, username="")
 
     @property
     def state(self) -> State | None:

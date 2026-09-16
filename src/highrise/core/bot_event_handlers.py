@@ -40,9 +40,6 @@ async def handle_session_metadata(bot: "BaseBot", data: dict[str, Any]) -> None:
     metadata = SessionMetadata._from_raw(data)
     bot._context.session_metadata = metadata
     await bot.on_start(metadata)
-    # Fire on_reconnect for every session after the first so bots can
-    # distinguish a fresh boot from a reconnect without having to track
-    # their own session counter.
     if bot._connection._session_generation > 1:
         try:
             await bot.on_reconnect(metadata)
@@ -107,7 +104,8 @@ async def handle_tip_reaction(bot: "BaseBot", data: dict[str, Any]) -> None:
 async def handle_emote_event(bot: "BaseBot", data: dict[str, Any]) -> None:
     user = _get_user(bot, data.get("user"))
     emote_id = str(data.get("emote_id") or "")
-    receiver = _get_user(bot, data.get("receiver"))
+    receiver_data = data.get("receiver")
+    receiver = _get_user(bot, receiver_data) if receiver_data else None
     bot.awaiter._feed("on_emote", (user, emote_id, receiver))
     await bot.on_emote(user, emote_id, receiver)
 

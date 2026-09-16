@@ -12,7 +12,6 @@ class BotHooks:
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
-        # Warn at class-definition time if a subclass overrides a deprecated hook.
         if "on_voice_change" in cls.__dict__:
             warnings.warn(
                 f"{cls.__name__} overrides 'on_voice_change', which was deprecated "
@@ -67,11 +66,10 @@ class BotHooks:
         """Called when a user leaves the room."""
         pass
 
-    async def on_emote(self, user: User, emote_id: str, receiver: Receiver) -> None:
+    async def on_emote(self, user: User, emote_id: str, receiver: Receiver | None) -> None:
         """Called when a user performs an emote.
 
-        .. note::
-            This event may be deprecated by Highrise in a future update.
+        `receiver` is `None` for room-wide emotes.
         """
         pass
 
@@ -94,13 +92,7 @@ class BotHooks:
         """Called when the bot receives a Direct Message (DM).
 
         `message` is `None` unless `auto_fetch.direct_message` is enabled
-        in `BotConfig`, since fetching the message content requires an
-        extra API call. Enable it via:
-
-        ```
-        config = BotConfig(auto_fetch=AutoFetchConfig(direct_message=True))
-        bot = MyBot(config)
-        ```
+        in `BotConfig`.
         """
         pass
 
