@@ -13,6 +13,8 @@ from .logger import setup_logger
 class LoopTask:
     """Run an async callable on a fixed interval with safe cancellation."""
 
+    __slots__ = ("_coro_fn", "_seconds", "_logger", "_task")
+
     def __init__(
         self,
         coro_fn: Callable[[], Coroutine[Any, Any, None]],

@@ -31,6 +31,16 @@ def _default_key_extractor(event_type: str, payload: tuple) -> Any:
 class _PendingWait:
     """Internal state for a single wait_for() call."""
 
+    __slots__ = (
+        "event_type",
+        "filter_fn",
+        "max_count",
+        "unique",
+        "results",
+        "_seen_keys",
+        "future",
+    )
+
     def __init__(
         self,
         event_type: str,
@@ -71,6 +81,8 @@ class _PendingWait:
 
 class Awaiter:
     """Manages event-based waits with filtering, timeout, max-count, and uniqueness."""
+
+    __slots__ = ("_pending",)
 
     def __init__(self) -> None:
         self._pending: dict[str, list[_PendingWait]] = {}

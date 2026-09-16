@@ -16,6 +16,14 @@ if TYPE_CHECKING:
 class TaskManager:
     """Owns SDK tasks with explicit persistent and connection scopes."""
 
+    __slots__ = (
+        "bot",
+        "_persistent_tasks",
+        "_connection_tasks",
+        "_loops",
+        "_core_started",
+    )
+
     def __init__(self, bot: "BaseBot") -> None:
         self.bot = bot
         self._persistent_tasks: set[asyncio.Task[Any]] = set()

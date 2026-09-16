@@ -14,6 +14,16 @@ class Metrics:
     the Metrics instance.
     """
 
+    __slots__ = (
+        "_connected_at",
+        "_last_latency",
+        "_peak_latency",
+        "_events_processed",
+        "_events_dropped",
+        "_lifetime_events_processed",
+        "_lifetime_events_dropped",
+    )
+
     def __init__(self) -> None:
         self._connected_at: float | None = None
         self._last_latency: float | None = None

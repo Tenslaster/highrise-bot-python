@@ -61,11 +61,7 @@ class Position:
 
     def distance_to(self, other: "Position") -> float:
         """Calculate the 3D distance to another position."""
-        return math.sqrt(
-            (self.x - other.x) ** 2 +
-            (self.y - other.y) ** 2 +
-            (self.z - other.z) ** 2
-        )
+        return math.hypot(self.x - other.x, self.y - other.y, self.z - other.z)
 
     def offset(self, dx: int = 0, dy: int = 0, dz: int = 0) -> "Position":
         """Return a new Position shifted by the given values, keeping the facing direction."""
@@ -76,7 +72,7 @@ class Position:
             facing=self.facing
         )
 
-    def as_tuple(self) -> tuple[int, int, int]:
+    def as_tuple(self) -> tuple[float, float, float]:
         """Return the coordinates as a simple (x, y, z) tuple, ignoring facing direction."""
         return (self.x, self.y, self.z)
 
@@ -93,46 +89,58 @@ class Message:
     content: str
     """The full text content of the message."""
 
-    _args: list[str] = field(init=False, repr=False)
+    _args: list[str] | None = field(default=None, init=False, repr=False)
+    _rest: list[str] | None = field(default=None, init=False, repr=False)
+    _mentions: list[str] | None = field(default=None, init=False, repr=False)
 
-    def __post_init__(self) -> None:
-        self._args = self.content.strip().split() if self.content else []
+    def _get_args(self) -> list[str]:
+        args = self._args
+        if args is None:
+            args = self.content.strip().split() if self.content else []
+            self._args = args
+        return args
 
     def command(self) -> str | None:
         """Returns the first word of the message, treated as the
         command name if this message is a command."""
-        return self._args[0] if self._args else None
+        args = self._get_args()
+        return args[0] if args else None
 
-    def args(self, index:int | None = None) -> list[str] | str | None:
+    def args(self, index: int | None = None) -> list[str] | str | None:
         """Returns the message arguments (excluding the command itself).
         Pass an index to get a specific argument, or omit it to get
         the full list."""
-        rest = self._args[1:] if self._args else []
+        all_args = self._get_args()
+        if not all_args or len(all_args) <= 1:
+            return [] if index is None else None
 
         if index is None:
-            return rest
+            if self._rest is None:
+                self._rest = all_args[1:]
+            return self._rest
 
-        try:
-            return rest[index]
-        except IndexError:
-            return None
-
+        if index >= 0:
+            idx = index + 1
+            return all_args[idx] if idx < len(all_args) else None
+        else:
+            return all_args[index] if abs(index) <= len(all_args) - 1 else None
 
     def mentions(self, index: int | None = None) -> list[str] | str | None:
         """Returns all mentioned usernames (words starting with '@',
         with the '@' stripped). Pass an index to get a specific
         mention, or omit it to get the full list."""
-        all_mentions = [
-            word[1:] for word in self._args if word.startswith("@")
-        ]
+        if self._mentions is None:
+            self._mentions = [
+                word[1:] for word in self._get_args() if word.startswith("@")
+            ]
 
         if index is None:
-            return all_mentions
+            return self._mentions
 
-        try:
-            return all_mentions[index]
-        except IndexError:
-            return None
+        if index >= 0:
+            return self._mentions[index] if index < len(self._mentions) else None
+        else:
+            return self._mentions[index] if abs(index) <= len(self._mentions) else None
 
 
 @dataclass(slots=True)
@@ -154,7 +162,7 @@ class ModerationAction:
     duration: int | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class RoomInfo:
     """Room information included in the session metadata."""
     owner_id: str
@@ -168,7 +176,7 @@ class RoomInfo:
             room_name=room_info.get("room_name", ""),
         )
 
-@dataclass
+@dataclass(slots=True)
 class SessionMetadata:
     """Initial session data.
 
@@ -201,7 +209,7 @@ class SessionMetadata:
             sdk_version=data.get("sdk_version"),
         )
 
-@dataclass
+@dataclass(slots=True)
 class MessageEntry:
     """A single message entry, as returned by `get_messages` or nested
     inside a `Conversation` as its `last_message`."""
@@ -212,7 +220,7 @@ class MessageEntry:
     sender_id: str
     category: str
 
-@dataclass
+@dataclass(slots=True)
 class ConversationEntry:
     """A single conversation entry as returned by `get_conversations`."""
     id: str
@@ -224,7 +232,7 @@ class ConversationEntry:
     name: str | None = None
     owner_id: str | None = None
 
-@dataclass
+@dataclass(slots=True)
 class OutfitItem:
     """A single item in a user's outfit."""
     type: str
@@ -233,7 +241,7 @@ class OutfitItem:
     account_bound: bool
     active_palette: int
 
-@dataclass
+@dataclass(slots=True)
 class RoomPermissions:
     """Room privilege flags to assign to a user."""
     moderator: bool | None = None
@@ -245,7 +253,7 @@ class CurrencyItem:
     type: CurrencyType
     amount: int
 
-@dataclass
+@dataclass(slots=True)
 class Credentials:
     """Room/token pair used for the current session."""
     room_id: str

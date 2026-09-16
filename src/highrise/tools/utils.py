@@ -1,7 +1,14 @@
 from ..models.websocket.highrise_models import TipType, TIP_VALUES
 
+_SORTED_TIP_TIERS: tuple[tuple[int, TipType], ...] = tuple(
+    sorted(TIP_VALUES.items(), reverse=True)
+)
+
+
 class Utils:
     """Stateless helper functions used across the SDK."""
+
+    __slots__ = ()
 
     @staticmethod
     def split_tip(amount: int) -> list[TipType]:
@@ -9,13 +16,14 @@ class Utils:
         if amount <= 0:
             return []
 
-        tiers = sorted(TIP_VALUES.items(), reverse=True)
         result: list[TipType] = []
-
-        for value, tier in tiers:
-            while amount >= value:
-                result.append(tier)
-                amount -= value
+        for value, tier in _SORTED_TIP_TIERS:
+            if amount < value:
+                continue
+            count, amount = divmod(amount, value)
+            result.extend([tier] * count)
+            if amount == 0:
+                break
 
         return result
 

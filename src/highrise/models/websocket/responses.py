@@ -20,7 +20,7 @@ from .highrise_models import (
 TPage = TypeVar("TPage", bound="BaseResponse")
 
 
-@dataclass
+@dataclass(slots=True)
 class AcknowledgementResponse(BaseResponse):
     """A generic response for requests that only need to confirm
     success or failure, with no additional data returned.
@@ -36,6 +36,8 @@ class AcknowledgementResponse(BaseResponse):
 
 class ResponseIterator(Generic[TPage]):
     """Handles the async iteration state safely. Works for any paginated BaseResponse subclass that exposes `next_page_fn`."""
+
+    __slots__ = ("_current_response", "_first_page_yielded")
 
     def __init__(self, initial_response: TPage):
         self._current_response: TPage | None = initial_response
@@ -53,7 +55,7 @@ class ResponseIterator(Generic[TPage]):
         self._current_response = nxt
         return nxt
 
-@dataclass
+@dataclass(slots=True)
 class GetMessagesResponse(BaseResponse):
     """Response for fetching messages from a single conversation.
 
@@ -73,7 +75,7 @@ class GetMessagesResponse(BaseResponse):
     def __aiter__(self) -> "ResponseIterator[GetMessagesResponse]":
         return ResponseIterator(self)
 
-@dataclass
+@dataclass(slots=True)
 class GetConversationsResponse(BaseResponse):
     """Response for fetching the bot's list of conversations.
 
@@ -109,7 +111,7 @@ class GetConversationsResponse(BaseResponse):
     def __aiter__(self) -> "ResponseIterator[GetConversationsResponse]":
         return ResponseIterator(self)
 
-@dataclass
+@dataclass(slots=True)
 class TipUserResponse(BaseResponse):
     """Response for tipping a user."""
     result: TipUserResult | None = None
@@ -117,7 +119,7 @@ class TipUserResponse(BaseResponse):
     def _build(self, data: Any) -> None:
         self.result = data.get("result")
 
-@dataclass
+@dataclass(slots=True)
 class GetUserOutfitResponse(BaseResponse):
     """Response for fetching a user's outfit."""
     outfit: list[OutfitItem] = field(default_factory=list)
@@ -136,7 +138,7 @@ class GetUserOutfitResponse(BaseResponse):
         """Finds the item with the given id in the outfit, or None if not present."""
         return next((item for item in self.outfit if item.id == item_id), None)
 
-@dataclass
+@dataclass(slots=True)
 class GetRoomUsersResponse(BaseResponse):
     """The list of users in the room, alongside their positions."""
     content: list[tuple[User, Position | AnchorPosition]] = field(default_factory=list)
@@ -195,7 +197,7 @@ class GetRoomUsersResponse(BaseResponse):
         pair = self.find_user(identifier)
         return pair[1] if pair else None
 
-@dataclass
+@dataclass(slots=True)
 class CheckVoiceChatResponse(BaseResponse):
     """The status of voice chat in the room."""
     seconds_left: int = 0
@@ -207,7 +209,7 @@ class CheckVoiceChatResponse(BaseResponse):
         self.auto_speakers = set(data.get("auto_speakers", []))
         self.users = data.get("users", {})
 
-@dataclass
+@dataclass(slots=True)
 class GetRoomPrivilegeResponse(BaseResponse):
     """The room privileges for a user."""
     moderator: bool | None = None
@@ -218,7 +220,7 @@ class GetRoomPrivilegeResponse(BaseResponse):
         self.moderator = content.get("moderator")
         self.designer = content.get("designer")
 
-@dataclass
+@dataclass(slots=True)
 class GetWalletResponse(BaseResponse):
     """The bot's wallet. Contains Highrise currencies."""
     content: list[CurrencyItem] = field(default_factory=list)
@@ -231,7 +233,7 @@ class GetWalletResponse(BaseResponse):
         """Returns the amount held for the given currency type, or `None` if not present."""
         return next((item.amount for item in self.content if item.type == currency_type), None)
 
-@dataclass
+@dataclass(slots=True)
 class BuyItemResponse(BaseResponse):
     """Response for buying an item."""
     result: ItemPurchaseResult | None = None
@@ -239,7 +241,7 @@ class BuyItemResponse(BaseResponse):
     def _build(self, data: Any) -> None:
         self.result = data.get("result")
 
-@dataclass
+@dataclass(slots=True)
 class GetInventoryResponse(BaseResponse):
     """The bot's inventory."""
     items: list[OutfitItem] = field(default_factory=list)

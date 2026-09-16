@@ -9,6 +9,8 @@ class Cache(Generic[T]):
     """A simple key/value cache with no expiry. Entries live until
     explicitly invalidated or cleared."""
 
+    __slots__ = ("_store",)
+
     def __init__(self) -> None:
         self._store: dict[str, T] = {}
 
@@ -27,6 +29,8 @@ class Cache(Generic[T]):
 class CacheManager:
     """Holds per-resource caches. Each resource type gets its own
     Cache instance so invalidation stays scoped and predictable."""
+
+    __slots__ = ("outfit",)
 
     def __init__(self) -> None:
         self.outfit: Cache[GetUserOutfitResponse] = Cache()

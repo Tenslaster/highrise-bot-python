@@ -263,15 +263,10 @@ class ConnectionManager:
 
     async def _handle_raw_frame(self, raw_frame: str | bytes) -> None:
         try:
-            if isinstance(raw_frame, bytes):
-                raw_frame = raw_frame.decode("utf-8")
             data = loads(raw_frame)
         except (UnicodeDecodeError, ValueError) as exc:
             # Covers both stdlib json.JSONDecodeError and orjson.JSONDecodeError
-            # (both are ValueError subclasses) without a hard dependency on
-            # whichever codec is active. `json` was never imported here, so
-            # referencing json.JSONDecodeError directly raised a NameError on
-            # every malformed frame instead of triggering a clean reconnect.
+            # (both are ValueError subclasses).
             raise InvalidPayloadError(f"Invalid JSON frame: {exc}") from exc
 
         if not isinstance(data, dict):

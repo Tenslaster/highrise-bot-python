@@ -6,7 +6,7 @@ from pathlib import Path
 if TYPE_CHECKING:
     from ..base_bot import BaseBot
 
-@dataclass
+@dataclass(slots=True)
 class Command:
     """Metadata + handler for a single command.
 
@@ -30,6 +30,8 @@ class CommandHandler:
     """Loads command files from a directory and dispatches messages
     into them by name, tolerating any per-command failure without
     affecting the bot's main loop."""
+
+    __slots__ = ("bot", "_commands")
 
     def __init__(self, bot: "BaseBot") -> None:
         self.bot = bot

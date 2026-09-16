@@ -13,6 +13,20 @@ def _parse_user(data: dict | None) -> User:
     return User(str(data.get("id", "")), str(data.get("username", "")))
 
 
+def _get_user(bot: "BaseBot", data: dict | None) -> User:
+    """Returns an existing cached User instance if present to avoid GC churn;
+    otherwise creates and returns a new User instance."""
+    if not data:
+        return User("", "")
+    uid = data.get("id")
+    if uid:
+        cached = bot.cached_users.find_user(uid)
+        if cached is not None:
+            return cached[0]
+        return User(str(uid), str(data.get("username", "")))
+    return User("", str(data.get("username", "")))
+
+
 def _parse_position(pos_data: dict) -> Position:
     return Position(
         pos_data.get("x", 0.0),
@@ -40,7 +54,7 @@ async def handle_session_metadata(bot: "BaseBot", data: dict[str, Any]) -> None:
 async def handle_chat_event(bot: "BaseBot", data: dict[str, Any]) -> None:
     user_data = data.get("user") or {}
     is_whisper = bool(user_data.get("whisper", False))
-    user = _parse_user(user_data)
+    user = _get_user(bot, user_data)
     message = Message(str(data.get("message") or ""))
 
     if is_whisper:
@@ -59,13 +73,13 @@ async def handle_user_join(bot: "BaseBot", data: dict[str, Any]) -> None:
 
 
 async def handle_user_leave(bot: "BaseBot", data: dict[str, Any]) -> None:
-    user = _parse_user(data.get("user"))
+    user = _get_user(bot, data.get("user"))
     bot.cached_users._remove(user.id)
     await bot.on_user_leave(user)
 
 
 async def handle_user_moved(bot: "BaseBot", data: dict[str, Any]) -> None:
-    user = _parse_user(data.get("user"))
+    user = _get_user(bot, data.get("user"))
     pos_data = data.get("position") or {}
     position = None
     anchor = None
@@ -82,8 +96,8 @@ async def handle_user_moved(bot: "BaseBot", data: dict[str, Any]) -> None:
 
 
 async def handle_tip_reaction(bot: "BaseBot", data: dict[str, Any]) -> None:
-    sender = _parse_user(data.get("sender"))
-    receiver = _parse_user(data.get("receiver"))
+    sender = _get_user(bot, data.get("sender"))
+    receiver = _get_user(bot, data.get("receiver"))
     item_data = data.get("item") or {}
     item = Item(item_data.get("type"), item_data.get("amount"))
     bot.awaiter._feed("on_tip", (sender, receiver, item))
@@ -91,9 +105,9 @@ async def handle_tip_reaction(bot: "BaseBot", data: dict[str, Any]) -> None:
 
 
 async def handle_emote_event(bot: "BaseBot", data: dict[str, Any]) -> None:
-    user = _parse_user(data.get("user"))
+    user = _get_user(bot, data.get("user"))
     emote_id = str(data.get("emote_id") or "")
-    receiver = _parse_user(data.get("receiver"))
+    receiver = _get_user(bot, data.get("receiver"))
     bot.awaiter._feed("on_emote", (user, emote_id, receiver))
     await bot.on_emote(user, emote_id, receiver)
 

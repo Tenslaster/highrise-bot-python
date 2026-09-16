@@ -10,6 +10,8 @@ class Roles:
     to a local `JSON` file. Loads synchronously on construction, saving
     happens periodically via a background task started by `BaseBot`."""
 
+    __slots__ = ("path", "roles")
+
     def __init__(self, path: str | Path = "./jsons/roles.json") -> None:
         self.path = Path(path)
         self.roles: dict[str, set[str]] = {"mod": set(), "owner": set()}

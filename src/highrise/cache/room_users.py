@@ -33,7 +33,14 @@ class RoomUsersCache:
             return
 
         user, _ = existing
-        self._add(user, position)
+        entry = (user, position)
+        self._by_id[user.id] = entry
+        self._by_username[user.username] = entry
+
+    def get_user(self, identifier: str) -> User | None:
+        """Returns the User object for the given user id or username, or None if not found."""
+        pair = self.find_user(identifier)
+        return pair[0] if pair else None
 
     def _remove(self, identifier: str) -> None:
         """Removes a user's entry, by user_id or username."""
