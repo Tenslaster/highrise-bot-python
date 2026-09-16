@@ -117,6 +117,11 @@ class WSRequester:
         self._pending_requests.clear()
 
     def reopen(self) -> None:
+        # Drain any futures that are still pending from the previous session.
+        # Without this, a future registered before a socket drop could linger in
+        # _pending_requests and be incorrectly resolved by an unrelated response
+        # that arrives on the fresh connection with a matching (recycled) rid.
+        self.close("Session ended; requester reopening for new connection.")
         self._session += 1
         self._closed = False
 

@@ -151,3 +151,18 @@ class BaseBot(BotHooks):
     def events_processed(self) -> int:
         """Total events processed since the current connection was established."""
         return self._context.metrics.events_processed
+
+    @property
+    def lifetime_events_processed(self) -> int:
+        """Total events processed across all connections since bot startup."""
+        return self._context.metrics.lifetime_events_processed
+
+    @property
+    def lifetime_events_dropped(self) -> int:
+        """Total events dropped across all connections since bot startup."""
+        return self._context.metrics.lifetime_events_dropped
+
+    @property
+    def peak_latency(self) -> float | None:
+        """Highest observed keepalive round-trip this session, or None."""
+        return self._context.metrics.peak_latency

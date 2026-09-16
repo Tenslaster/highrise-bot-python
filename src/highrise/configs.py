@@ -45,6 +45,8 @@ class ConnectionConfig:
             raise ValueError("reconnect_backoff_factor must be >= 1")
         if not 0 <= self.reconnect_jitter <= 1:
             raise ValueError("reconnect_jitter must be between 0 and 1")
+        if self.max_reconnect_attempts is not None and self.max_reconnect_attempts <= 0:
+            raise ValueError("max_reconnect_attempts must be a positive integer if set")
 
 
 @dataclass

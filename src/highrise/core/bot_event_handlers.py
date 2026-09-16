@@ -26,6 +26,14 @@ async def handle_session_metadata(bot: "BaseBot", data: dict[str, Any]) -> None:
     metadata = SessionMetadata._from_raw(data)
     bot._context.session_metadata = metadata
     await bot.on_start(metadata)
+    # Fire on_reconnect for every session after the first so bots can
+    # distinguish a fresh boot from a reconnect without having to track
+    # their own session counter.
+    if bot._connection._session_generation > 1:
+        try:
+            await bot.on_reconnect(metadata)
+        except Exception as exc:
+            bot.logger.error("Error in on_reconnect hook: %s", exc, exc_info=True)
     bot.logger.info("Successfully connected to Highrise!")
 
 

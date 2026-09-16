@@ -69,7 +69,13 @@ class RoomUsersCache:
         return pair[1] if pair else None
 
     def get_all(self) -> list[tuple[User, Position | AnchorPosition]]:
-        """Returns all cached (user, position) pairs."""
+        """Returns all cached (user, position) pairs as a new list.
+
+        For read-only iteration, prefer iterating the cache directly::
+
+            for user, position in bot.cached_users:
+                ...
+        """
         return list(self._by_id.values())
 
     def users_count(self) -> int:
@@ -80,3 +86,32 @@ class RoomUsersCache:
         """Clears the cache."""
         self._by_id.clear()
         self._by_username.clear()
+
+    # --- Pythonic collection interface ---
+
+    def __len__(self) -> int:
+        """Returns the number of cached users. Enables ``len(bot.cached_users)``."""
+        return len(self._by_id)
+
+    def __iter__(self):
+        """Iterates over all cached ``(User, Position | AnchorPosition)`` pairs.
+
+        Yields from the internal dict's values view, which is a live view
+        with no extra allocation. For example::
+
+            for user, pos in bot.cached_users:
+                print(user.username, pos)
+        """
+        return iter(self._by_id.values())
+
+    def __contains__(self, identifier: object) -> bool:
+        """Returns True if a user with the given user_id or username is cached.
+
+        Enables the ``in`` operator::
+
+            if "someuser" in bot.cached_users:
+                ...
+        """
+        if not isinstance(identifier, str):
+            return False
+        return self.find_user(identifier) is not None

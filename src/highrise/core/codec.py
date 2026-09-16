@@ -10,11 +10,16 @@ except ImportError:  # pragma: no cover
     orjson = None
 
 
-def dumps(value: Any) -> str | bytes:
-    """Serialize compact JSON, preferring orjson when installed."""
+def dumps(value: Any) -> bytes:
+    """Serialize to compact JSON bytes, preferring orjson when installed.
+
+    Always returns ``bytes`` so callers have a single, predictable type
+    regardless of which codec is active. ``websockets`` accepts both
+    ``str`` and ``bytes``, so this is a safe, transparent normalisation.
+    """
     if orjson is not None:
         return orjson.dumps(value)
-    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
 def loads(value: str | bytes | bytearray) -> Any:

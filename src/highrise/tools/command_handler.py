@@ -39,7 +39,15 @@ class CommandHandler:
         """Imports every `.py` file in the given directory and registers
         any `command: Command` object it defines at module level.
         
-        - Can be used to reload the commands"""
+        - Can be used to reload the commands.
+
+        Each module is registered in ``sys.modules`` under the key
+        ``highrise_commands.<stem>`` so that stateful imports inside
+        command files share a single module instance rather than being
+        silently duplicated on every reload.
+        """
+        import sys
+
         path = Path(directory).expanduser()
         if not path.is_dir():
             self.bot.logger.warning(f"Command directory '{directory}' not found, skipping.")
@@ -52,15 +60,21 @@ class CommandHandler:
             if file.stem.startswith("_"):
                 continue
 
-            spec = importlib.util.spec_from_file_location(file.stem, file)
+            module_key = f"highrise_commands.{file.stem}"
+            spec = importlib.util.spec_from_file_location(module_key, file)
             if spec is None or spec.loader is None:
                 continue
 
             module = importlib.util.module_from_spec(spec)
+            # Register in sys.modules *before* exec so that relative imports
+            # and module-level state inside the command file are shared across
+            # reloads rather than silently re-created as separate instances.
+            sys.modules[module_key] = module
             try:
                 spec.loader.exec_module(module)
             except Exception as e:
                 self.bot.logger.error(f"Failed to load command file '{file.name}': {e}", exc_info=True)
+                sys.modules.pop(module_key, None)
                 continue
 
             command = getattr(module, "command", None)

@@ -147,6 +147,15 @@ class ConnectionManager:
         return True
 
     async def _connect_and_listen(self) -> None:
+        # Fire on_disconnect before we clean up the previous session.
+        # We skip the very first call (session_generation == 0) since there's
+        # nothing to disconnect from yet.
+        if self._session_generation > 0:
+            try:
+                await self.bot.on_disconnect()
+            except Exception as exc:
+                self.bot.logger.error("Error in on_disconnect hook: %s", exc, exc_info=True)
+
         await self._cleanup_connection()
         self._session_generation += 1
         self.bot._context.requester.reopen()
@@ -198,6 +207,16 @@ class ConnectionManager:
             )
 
     async def _event_worker(self) -> None:
+        """Dequeue and dispatch events from the bounded event queue.
+
+        **Pause behaviour**: while the bot is paused, events that have
+        already been dequeued are *discarded*. Events arriving at the
+        WebSocket frame level while paused are also dropped in
+        ``_handle_raw_frame`` before they even reach the queue.
+        This is intentional — pause means "drop all incoming events".
+        If you need to buffer events across a pause, implement that logic
+        in your own ``on_*`` handler by checking ``bot.is_paused``.
+        """
         queue = self._event_queue
         if queue is None:
             return
@@ -207,6 +226,7 @@ class ConnectionManager:
                 if data is None:
                     return
                 if self._is_paused:
+                    # Intentionally drop the event. See docstring above.
                     continue
                 await self._dispatch_events(data)
             except asyncio.CancelledError:

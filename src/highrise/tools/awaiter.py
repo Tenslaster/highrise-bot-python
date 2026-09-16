@@ -81,7 +81,11 @@ class Awaiter:
         if not waits:
             return
 
-        for wait in waits:
+        # Iterate over a snapshot. try_add() may resolve a future, which
+        # schedules the awaiting coroutine's finally-block to run
+        # _pending[event_type].remove(wait) — mutating the live list while
+        # we iterate it. The snapshot makes this safe in all cases.
+        for wait in list(waits):
             wait.try_add(payload)
 
     async def _wait_for(

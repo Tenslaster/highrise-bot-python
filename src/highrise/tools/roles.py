@@ -60,7 +60,11 @@ class Roles:
                 json.dump(serializable, f, indent=2)
             os.replace(tmp_path, self.path)
         except Exception:
-            os.unlink(tmp_path)
+            # Clean up the temp file without masking the original exception.
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
             raise
 
     def add_role(self, role: str, user_id: str) -> None:
