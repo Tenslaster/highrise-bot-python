@@ -128,19 +128,33 @@ class BaseBot(BotHooks):
 
     @property
     def bot_id(self) -> str | None:
-        return self.my_id
+        return self.bot_user_id
 
     @property
     def bot_user_id(self) -> str | None:
-        return self.my_id
+        """The bot's user ID.
+
+        The setter is intentionally supported for compatibility with existing
+        bots that initialize ``self.bot_user_id = None`` or populate the ID
+        themselves. A non-empty explicit value takes precedence; otherwise
+        the ID is resolved automatically from session metadata.
+        """
+        explicit_id = getattr(self, "_explicit_bot_user_id", None)
+        return explicit_id or self.my_id
+
+    @bot_user_id.setter
+    def bot_user_id(self, value: str | None) -> None:
+        if value is not None and not isinstance(value, str):
+            raise TypeError("bot_user_id must be a string or None")
+        self._explicit_bot_user_id = value
 
     @property
     def user_id(self) -> str | None:
-        return self.my_id
+        return self.bot_user_id
 
     @property
     def me(self) -> User | None:
-        user_id = self.my_id
+        user_id = self.bot_user_id
         if user_id is None:
             return None
         return User(id=user_id, username="")
