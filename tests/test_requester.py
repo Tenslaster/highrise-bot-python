@@ -5,6 +5,7 @@ import pytest
 
 from highrise.core.bot_ws_requester import WSRequester
 from highrise.errors import RequestTimeoutError
+from highrise.models.websocket.requests import EmoteRequest
 
 
 class FakeWS:
@@ -22,7 +23,6 @@ auto_loop = pytest.mark.asyncio
 @auto_loop
 async def test_request_is_correlated_and_cleaned_up():
     ws = FakeWS()
-    # Patch the exact state object expected by the requester.
     from websockets import State
     ws.state = State.OPEN
     requester = WSRequester(lambda: ws, logger=None, default_timeout=0.2)
@@ -52,3 +52,18 @@ async def test_timeout_cleans_registry():
         await requester.send({"_type": "Test"})
 
     assert requester.pending_count == 0
+
+
+def test_emote_request_room_payload_matches_protocol():
+    assert EmoteRequest("idle-hello").to_dict() == {
+        "_type": "EmoteRequest",
+        "emote_id": "idle-hello",
+    }
+
+
+def test_emote_request_target_payload_matches_protocol():
+    assert EmoteRequest("idle-hello", "USER123").to_dict() == {
+        "_type": "EmoteRequest",
+        "emote_id": "idle-hello",
+        "target_user_id": "USER123",
+    }

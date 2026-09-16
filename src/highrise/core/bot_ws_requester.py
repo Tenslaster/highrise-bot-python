@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import dataclass
 from itertools import count
 from typing import Any
 
@@ -18,16 +19,24 @@ from ..errors import (
 from .codec import dumps
 
 
-class WSRequester:
-    """Low-overhead request multiplexer.
+@dataclass(slots=True)
+class PendingRequest:
+    """Bookkeeping for one in-flight request."""
 
-    One Future represents exactly one request. Pending requests are scoped to
-    this requester instance, and every terminal path removes its registry entry.
+    future: asyncio.Future[tuple[bool, Any]]
+    request_type: str
+
+
+class WSRequester:
+    """Request multiplexer with scoped IDs, cleanup, and serialized writes.
+
+    Every terminal path removes a pending request. Writes are protected by one
+    lock because several bot tasks may send at the same time.
     """
 
     __slots__ = (
         "_get_ws", "logger", "default_timeout", "max_pending_requests",
-        "_pending_requests", "_ids", "_closed", "_session", "_lock",
+        "_pending_requests", "_ids", "_closed", "_session", "_write_lock",
     )
 
     def __init__(
@@ -46,11 +55,11 @@ class WSRequester:
         self.logger = logger
         self.default_timeout = default_timeout
         self.max_pending_requests = max_pending_requests
-        self._pending_requests: dict[str, asyncio.Future[tuple[bool, Any]]] = {}
+        self._pending_requests: dict[str, PendingRequest] = {}
         self._ids = count()
         self._closed = False
         self._session = 0
-        self._lock = asyncio.Lock()
+        self._write_lock = asyncio.Lock()
 
     @property
     def pending_count(self) -> int:
@@ -69,26 +78,32 @@ class WSRequester:
                 f"Maximum pending requests reached ({self.max_pending_requests})."
             )
 
+        deadline = self.default_timeout if timeout is None else timeout
+        if deadline <= 0:
+            raise ValueError("timeout must be > 0")
+
         rid = f"{self._session:x}-{next(self._ids):x}"
         message = dict(payload)
         message["rid"] = rid
         future = asyncio.get_running_loop().create_future()
-        self._pending_requests[rid] = future
-        deadline = self.default_timeout if timeout is None else timeout
-        if deadline <= 0:
-            self._pending_requests.pop(rid, None)
-            raise ValueError("timeout must be > 0")
+        request_type = str(message.get("_type", "UnknownRequest"))
+        self._pending_requests[rid] = PendingRequest(future, request_type)
 
         try:
-            await ws.send(dumps(message))
+            # Serialize and send under the same lock. This prevents concurrent
+            # writes from interleaving while retaining concurrent responses.
+            async with self._write_lock:
+                await ws.send(dumps(message))
             return await asyncio.wait_for(asyncio.shield(future), deadline)
         except asyncio.TimeoutError as exc:
             raise RequestTimeoutError(
-                f"Request {rid} timed out after {deadline:.2f}s"
+                f"Request {rid} ({request_type}) timed out after {deadline:.2f}s"
             ) from exc
         except asyncio.CancelledError as exc:
             if not future.done():
                 future.cancel()
+            # Preserve asyncio cancellation semantics for shutdown. Callers
+            # that explicitly need a request error can inspect task state.
             raise RequestCancelledError(f"Request {rid} was cancelled.") from exc
         except (ConnectionError, OSError) as exc:
             raise ConnectionLostError(
@@ -101,26 +116,22 @@ class WSRequester:
         rid = data.get("rid")
         if not isinstance(rid, str):
             return False
-        future = self._pending_requests.get(rid)
-        if future is None or future.done():
+        pending = self._pending_requests.get(rid)
+        if pending is None or pending.future.done():
             return False
         if data.get("_type") == "Error":
-            future.set_result((False, data.get("message") or "Unknown server error."))
+            pending.future.set_result((False, data.get("message") or "Unknown server error."))
         else:
-            future.set_result((True, data))
+            pending.future.set_result((True, data))
         return True
 
     def close(self, reason: str = "Connection closed.") -> None:
-        for future in tuple(self._pending_requests.values()):
-            if not future.done():
-                future.set_result((False, reason))
+        for pending in tuple(self._pending_requests.values()):
+            if not pending.future.done():
+                pending.future.set_result((False, reason))
         self._pending_requests.clear()
 
     def reopen(self) -> None:
-        # Drain any futures that are still pending from the previous session.
-        # Without this, a future registered before a socket drop could linger in
-        # _pending_requests and be incorrectly resolved by an unrelated response
-        # that arrives on the fresh connection with a matching (recycled) rid.
         self.close("Session ended; requester reopening for new connection.")
         self._session += 1
         self._closed = False
