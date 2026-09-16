@@ -3,8 +3,8 @@ from __future__ import annotations
 from typing import Any, TYPE_CHECKING
 from collections.abc import Callable
 
-from .models.websocket.highrise_models import User
 from .errors import HighriseError
+from .compatibility import CompatibilityMixin
 from .mixins.highrise.chat import ChatMixin
 from .mixins.highrise.direct import DirectMixin
 from .mixins.highrise.channel import ChannelMixin
@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
 
 class HighriseApi(
+    CompatibilityMixin,
     ChatMixin,
     DirectMixin,
     ChannelMixin,
@@ -56,26 +57,16 @@ class HighriseApi(
         return credentials.room_id if credentials is not None else None
 
     @property
-    def api_token(self) -> str | None:
-        credentials = self._context.credentials
-        return credentials.api_token if credentials is not None else None
-
-    @property
-    def me(self) -> User | None:
-        user_id = self.bot_id
-        if user_id is None:
-            return None
-        return User(id=user_id, username="")
+    def me(self):
+        from .models.websocket.highrise_models import User
+        return User(self.bot_id, "") if self.bot_id else None
 
     async def _send_request(self, response_cls: Any, build_payload: Callable[[], dict]) -> Any:
         payload = build_payload()
         try:
             success, data = await self._context.requester.send(
-                payload,
-                timeout=self._context.requester.default_timeout,
+                payload, timeout=self._context.requester.default_timeout,
             )
             return response_cls._from_raw(success, data)
-        except ValueError as error:
-            return response_cls._from_raw(success=False, data=str(error))
-        except HighriseError as error:
-            return response_cls._from_raw(success=False, data=str(error))
+        except (ValueError, HighriseError) as error:
+            return response_cls._from_raw(False, str(error))
