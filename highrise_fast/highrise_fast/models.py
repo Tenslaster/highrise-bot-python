@@ -70,6 +70,7 @@ class Item:
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, Item):
             return NotImplemented
+
         return (
             self.type == other.type
             and self.amount == other.amount
@@ -125,7 +126,11 @@ class Message:
         return self.sender_id
 
     def __repr__(self) -> str:
-        return f"Message(message_id={self.message_id!r}, conversation_id={self.conversation_id!r}, sender_id={self.sender_id!r}, content={self.content[:40]!r})"
+        return (
+            f"Message(message_id={self.message_id!r}, "
+            f"conversation_id={self.conversation_id!r}, "
+            f"sender_id={self.sender_id!r}, content={self.content[:40]!r})"
+        )
 
 
 @dataclass
@@ -178,10 +183,15 @@ class Error:
         self.rid = rid
 
     def __repr__(self) -> str:
-        return f"Error(message={self.message!r}, do_not_reconnect={self.do_not_reconnect!r}, rid={self.rid!r})"
+        return (
+            f"Error(message={self.message!r}, "
+            f"do_not_reconnect={self.do_not_reconnect!r}, rid={self.rid!r})"
+        )
 
 
 # --- Events ---
+
+
 @dataclass
 class ChatEvent:
     user: User
@@ -256,6 +266,8 @@ class RoomModeratedEvent:
 
 
 # --- Responses ---
+
+
 @dataclass
 class GetRoomUsersResponse:
     content: list[tuple[User, Position | AnchorPosition]]
@@ -371,6 +383,8 @@ class MessageMediaResponse:
 
 
 # --- Acks ---
+
+
 @dataclass
 class ChatResponse:
     rid: str | None = None
@@ -460,6 +474,8 @@ _ACK_MAP: dict[str, type] = {
 
 
 # --- Control ---
+
+
 @dataclass
 class ControlSessionMetadata:
     connection_id: str
@@ -482,3 +498,7 @@ class ResponseError(Exception):
 
 class _DoNotReconnect(Exception):
     pass
+
+
+# Compatibility with official SDK request class names.
+from .compat_requests import *

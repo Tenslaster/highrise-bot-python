@@ -103,6 +103,8 @@ _DATETIME_KEYS: frozenset[str] = frozenset(
         # Grab responses
         "starts_at",
         "expires_at",
+        # Storefront seller responses
+        "last_connected_at",
     }
 )
 
@@ -140,13 +142,6 @@ def _wrap(value: Any) -> Any:
     return value
 
 
-def _wrap_with_dates(value: Any) -> Any:
-    """Wrap and parse datetime strings. Used only for known datetime keys."""
-    if isinstance(value, str):
-        return _parse_datetime(value)
-    return _wrap(value)
-
-
 class AttrDict:
     """Dictionary wrapper exposing dict keys as attributes.
 
@@ -175,7 +170,6 @@ class AttrDict:
 
         value = raw[key]
 
-        # Only parse datetimes for known fields.
         if key in _DATETIME_KEYS and isinstance(value, str):
             result = _parse_datetime(value)
         else:
@@ -198,6 +192,15 @@ class AttrDict:
             return self._resolve(key)
         except KeyError:
             return default
+
+    def keys(self):
+        return object.__getattribute__(self, "_raw").keys()
+
+    def values(self):
+        return object.__getattribute__(self, "_raw").values()
+
+    def items(self):
+        return object.__getattribute__(self, "_raw").items()
 
     def __contains__(self, key: str) -> bool:
         return key in object.__getattribute__(self, "_raw")
@@ -394,7 +397,6 @@ def parse_webapi_response(endpoint: str, data: Any) -> Any:
         return data
 
     parts = _segments(endpoint)
-
     if not parts:
         return data
 

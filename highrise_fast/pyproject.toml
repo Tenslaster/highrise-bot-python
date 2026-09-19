@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "highrise-fast"
+version = "1.0.0"
+description = "Custom high-performance standalone Highrise SDK"
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp",
+    "orjson",
+    "quattro",
+]
+
+[project.scripts]
+highrise-fast = "highrise_fast:main"
+
+[tool.setuptools]
+packages = ["highrise_fast"]

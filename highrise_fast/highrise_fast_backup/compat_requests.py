@@ -59,6 +59,7 @@ class _Request:
     """Minimal runtime-compatible request object."""
 
     _fields: tuple[str, ...] = ()
+    _defaults: ClassVar[dict[str, Any]] = {}
     Response: ClassVar[Any] = None
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -66,7 +67,14 @@ class _Request:
         values.update(kwargs)
 
         for name in self._fields:
-            setattr(self, name, values.get(name))
+            if name in values:
+                value = values[name]
+            else:
+                value = self._defaults.get(name)
+                if callable(value):
+                    value = value()
+
+            setattr(self, name, value)
 
     def __repr__(self) -> str:
         parts = [f"{name}={getattr(self, name, None)!r}" for name in self._fields]
@@ -141,6 +149,18 @@ _REQUESTS: tuple[tuple[str, tuple[str, ...], Any], ...] = (
     ("MessageMediaRequest", ("media", "rid"), MessageMediaResponse),
 )
 
+_DEFAULTS: dict[str, dict[str, Any]] = {
+    "ChannelRequest": {
+        "tags": set,
+    },
+    "GetConversationsRequest": {
+        "not_joined": False,
+    },
+    "BuyRoomBoostRequest": {
+        "amount": 1,
+    },
+}
+
 
 for _name, _fields, _response_cls in _REQUESTS:
     _cls = type(
@@ -148,12 +168,12 @@ for _name, _fields, _response_cls in _REQUESTS:
         (_Request,),
         {
             "_fields": _fields,
+            "_defaults": _DEFAULTS.get(_name, {}),
             "Response": _response_cls,
             _response_cls.__name__: _response_cls,
             "__module__": __name__,
             "__doc__": f"Compatibility shim for official {_name}.",
         },
     )
-
     globals()[_name] = _cls
     __all__.append(_name)

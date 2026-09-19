@@ -1,0 +1,2 @@
+[console_scripts]
+highrise-fast = highrise_fast:main
