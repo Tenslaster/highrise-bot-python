@@ -6,6 +6,25 @@
 [![License: Custom](https://img.shields.io/badge/License-Custom-red.svg)](LICENSE.md)
 [![orjson: optional](https://img.shields.io/badge/orjson-optional-brightgreen)](https://github.com/ijl/orjson)
 
+> **Package vs. import name:** the PyPI distribution is `highrise-bot-python`, but the importable package is `highrise_fast`.
+
+---
+
+## Table of Contents
+
+- [Why This Exists](#why-this-exists)
+- [Features](#features)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Benchmarks](#benchmarks)
+- [Feature Parity](#feature-parity)
+- [When to Use This SDK](#when-to-use-this-sdk)
+- [Project Structure](#project-structure)
+- [Environment Variables](#environment-variables)
+- [Security](#security)
+- [License](#license)
+- [Credits](#credits)
+
 ---
 
 ## Why This Exists
@@ -42,11 +61,17 @@ pip install "highrise-bot-python[fast]"
 
 # Development
 pip install "highrise-bot-python[dev]"
-Requirements: Python 3.11+, aiohttp (required), orjson (optional but strongly recommended).
+```
 
-Quick Start
-1. Define a bot
-python
+**Requirements:** Python 3.11+, `aiohttp` (required), `orjson` (optional but strongly recommended).
+
+---
+
+## Quick Start
+
+### 1. Define a bot
+
+```python
 from highrise_fast import BaseBot, Highrise
 
 class MyBot(BaseBot):
@@ -56,170 +81,240 @@ class MyBot(BaseBot):
 
     async def on_user_join(self, user: User) -> None:
         await self.highrise.chat(f"Welcome, {user.username}!")
-2. Run it
-bash
+```
+
+### 2. Run it
+
+```bash
 python -m highrise_fast my_bot:MyBot YOUR_ROOM_ID YOUR_API_TOKEN
+```
+
 Or programmatically:
 
-python
+```python
 import asyncio
 from highrise_fast import bot_runner
 
 asyncio.run(bot_runner("my_bot:MyBot", "ROOM_ID", "API_TOKEN"))
-3. Web API (optional)
-python
+```
+
+### 3. Web API (optional)
+
+```python
 from highrise_fast import WebAPI
 
 api = WebAPI(token="YOUR_API_TOKEN")
 room = await api.get_room("ROOM_ID")
-Benchmark Results
+```
+
+---
+
+## Benchmarks
+
 All benchmarks run on Python 3.11.9, Windows x64, 8 CPU cores.
-Official = highrise-bot-sdk (cattrs-based).
-Custom = highrise_fast (orjson-based).
-Full benchmark script: benchmark.py — run with python benchmark.py --iters 100000
 
-Test Suite Coverage
-Category	Tests	Rate
-A. Environment & dependencies	5	100%
-B. Import & startup	5	100%
-C. Object model creation	8	100%
-D. Object model mutation/access	6	100%
-E. Outgoing serialization	12	100%
-F. Incoming parsing	12	100%
-G. JSON backend comparison	6	100%
-H. WebSocket frame codec	4	100%
-I. Unicode & edge cases	8	100%
-J. Float & numeric precision	4	100%
-K. Concurrent async throughput	6	100%
-L. Leak & resource safety	4	100%
-M. GC pressure & memory	4	100%
-N. Wire format conversion	6	100%
-O. WebAPI & AttrDict	4	100%
-P. Error handling & recovery	3	100%
-Q. Sustained load endurance	3	100%
-Total	100	100%
-Avg speedup (custom vs official): 3.47×. Median speedup: 1.58×.
+- **Official** = `highrise-bot-sdk` (cattrs-based)
+- **Custom** = `highrise_fast` (orjson-based)
 
-Serialization — Outgoing Requests
-Request Type	Official	Custom	Speedup
-EmoteRequest	11.32 µs	824 ns	13.74×
-SendMessageRequest	10.33 µs	1.02 µs	10.16×
-ChatRequest (2000 chars)	13.11 µs	1.32 µs	9.95×
-ModerateRoomRequest	8.32 µs	868 ns	9.58×
-TeleportRequest	10.56 µs	1.12 µs	9.39×
-GetRoomUsersRequest	6.55 µs	766 ns	8.55×
-ChatRequest (short)	8.10 µs	1.03 µs	7.88×
-SetOutfitRequest (5 items)	25.39 µs	3.86 µs	6.58×
-SetOutfitRequest (10 items)	39.97 µs	6.64 µs	6.02×
-Payload size reduced by 6.9% per request (102 B → 95 B). Serialization throughput: 418.7 MB/s sustained.
+Full benchmark script: [`benchmark.py`](benchmark.py) — run with `python benchmark.py --iters 100000`.
 
-Parsing — Incoming Events
-Event/Response Type	Official	Custom	Speedup
-VoiceEvent	19.40 µs	5.86 µs	3.31×
-GetWalletResponse	13.21 µs	5.15 µs	2.56×
-Error	5.18 µs	2.18 µs	2.37×
-UserMovedEvent	9.18 µs	5.25 µs	1.75×
-TipReactionEvent	9.49 µs	5.70 µs	1.66×
-UserJoinedEvent	9.15 µs	5.68 µs	1.61×
-RoomModeratedEvent	5.30 µs	3.34 µs	1.59×
-EmoteEvent	5.50 µs	3.47 µs	1.58×
-UserLeftEvent	4.03 µs	2.83 µs	1.42×
-ChatEvent	4.61 µs	3.29 µs	1.40×
-28/28 event types parsed with zero type-name mismatches.
+### Test Suite Coverage
 
-Note: GetRoomUsersResponse with tuple content is a known cattrs limitation in the official SDK (ClassValidationError). The custom SDK parses it cleanly (20.27 µs for 5 users, 73.79 µs for 20 users).
+| Category                          | Tests | Rate |
+| --------------------------------- | ----: | ---: |
+| A. Environment & dependencies     |     5 | 100% |
+| B. Import & startup               |     5 | 100% |
+| C. Object model creation          |     8 | 100% |
+| D. Object model mutation/access   |     6 | 100% |
+| E. Outgoing serialization         |    12 | 100% |
+| F. Incoming parsing               |    12 | 100% |
+| G. JSON backend comparison        |     6 | 100% |
+| H. WebSocket frame codec          |     4 | 100% |
+| I. Unicode & edge cases           |     8 | 100% |
+| J. Float & numeric precision      |     4 | 100% |
+| K. Concurrent async throughput    |     6 | 100% |
+| L. Leak & resource safety         |     4 | 100% |
+| M. GC pressure & memory           |     4 | 100% |
+| N. Wire format conversion         |     6 | 100% |
+| O. WebAPI & AttrDict              |     4 | 100% |
+| P. Error handling & recovery      |     3 | 100% |
+| Q. Sustained load endurance       |     3 | 100% |
+| **Total**                         | **100** | **100%** |
 
-Round-Trip & Sustained Load
-Metric	Value
-Full round-trip (dict→encode→decode→dict)	1.55 µs avg (644,094 ops/s)
-Large payload round-trip (50 KB)	85.58 µs
-Encode-only	738 ns avg
-Decode-only	1.29 µs avg
-Sustained parse load (10 s)	2,711,400 ops, 271,139 ops/s, 0 errors
-p50 under sustained load	3.30 µs
-p95 under sustained load	4.20 µs
-p99 under sustained load	5.50 µs
-Memory & Import
-Metric	Official	Custom	Notes
-Import time (warm)	0.005 ms	30.8 ms	First load pays orjson C-extension cost
-Import memory (peak)	0.0 B	1.1 MB	orjson is a compiled extension
-Object memory (Position)	72 B	56 B	16 B smaller per object
-Object memory (Item)	80 B	72 B	8 B smaller per object
-Object memory (User)	56 B	56 B	Identical
-Registry leak (200 cancelled)	0	0	Both clean
-Fire-and-forget leak (200)	—	0 pending	Clean
-GC collections (10K parses)	—	0	Zero GC pressure
-Object growth (5K parses)	—	−3	No growth; slight net collection
-JSON Backend Comparison
-Backend	Serialization	Deserialization
-stdlib json	5.62 µs	4.77 µs
-ujson	1.66 µs	—
-orjson	590 ns	1.20 µs
-orjson speedup vs stdlib	9.52×	3.97×
-Type Safety
-Test Case	Official	Custom
-Valid ChatEvent	ACCEPT ✓	ACCEPT ✓
-ChatEvent: user wrong type	REJECT ✓	ACCEPT ✓
-ChatEvent: missing message	REJECT ✓	ACCEPT ✓
-Valid Error	ACCEPT ✓	ACCEPT ✓
-Error: missing message	REJECT ✓	ACCEPT ✓
-Malformed JSON rejection	✓	6/6 handled
-Unknown _type handling	—	4/4 handled
-highrise_fast intentionally favors throughput over strict validation — it never crashes on malformed input and fills sensible defaults for missing fields. If you need strict type enforcement, use the official SDK or add Pydantic validation on top.
+Avg speedup (custom vs official): **3.47×**. Median speedup: **1.58×**.
 
-Feature Parity
-Feature	Official	highrise_fast
-Highrise class methods	34	35 (+fail_pending)
-BaseBot event handlers	13	13 (identical)
-Model classes	12	12 (+ Message, Conversation, RoomInfo)
-Request types (wire-verified)	41	41 (0 mismatches)
-Event types (type-verified)	28	28 (0 mismatches)
-No attrs/cattrs dependency	✗	✓
-orjson fast path	✗	✓
-Finally-based cleanup	✗	✓
-Built-in telemetry	✗	✓
-Handles GetRoomUsersResponse (tuple content)	✗ (ClassValidationError)	✓
-When to Use This SDK
-Use Case	Recommendation
-High-throughput rooms (many players, frequent events)	highrise_fast
-Latency-sensitive commands (games, reactions)	highrise_fast
-Memory-constrained environments (small VPS, containers)	highrise_fast
-Strict type validation required (production data pipelines)	Official SDK
-Official support & long-term stability	Official SDK
-Rapid prototyping (no dependency management)	highrise_fast
-Project Structure
-text
+### Serialization — Outgoing Requests
+
+| Request Type                | Official  | Custom   | Speedup |
+| --------------------------- | --------: | -------: | ------: |
+| EmoteRequest                | 11.32 µs  | 824 ns   | 13.74×  |
+| SendMessageRequest          | 10.33 µs  | 1.02 µs  | 10.16×  |
+| ChatRequest (2000 chars)    | 13.11 µs  | 1.32 µs  |  9.95×  |
+| ModerateRoomRequest         |  8.32 µs  | 868 ns   |  9.58×  |
+| TeleportRequest             | 10.56 µs  | 1.12 µs  |  9.39×  |
+| GetRoomUsersRequest         |  6.55 µs  | 766 ns   |  8.55×  |
+| ChatRequest (short)         |  8.10 µs  | 1.03 µs  |  7.88×  |
+| SetOutfitRequest (5 items)  | 25.39 µs  | 3.86 µs  |  6.58×  |
+| SetOutfitRequest (10 items) | 39.97 µs  | 6.64 µs  |  6.02×  |
+
+Payload size reduced by **6.9% per request** (102 B → 95 B). Serialization throughput: **418.7 MB/s** sustained.
+
+### Parsing — Incoming Events
+
+| Event/Response Type      | Official | Custom  | Speedup |
+| ------------------------ | -------: | ------: | ------: |
+| VoiceEvent               | 19.40 µs | 5.86 µs |  3.31×  |
+| GetWalletResponse        | 13.21 µs | 5.15 µs |  2.56×  |
+| Error                    |  5.18 µs | 2.18 µs |  2.37×  |
+| UserMovedEvent           |  9.18 µs | 5.25 µs |  1.75×  |
+| TipReactionEvent         |  9.49 µs | 5.70 µs |  1.66×  |
+| UserJoinedEvent          |  9.15 µs | 5.68 µs |  1.61×  |
+| RoomModeratedEvent       |  5.30 µs | 3.34 µs |  1.59×  |
+| EmoteEvent               |  5.50 µs | 3.47 µs |  1.58×  |
+| UserLeftEvent            |  4.03 µs | 2.83 µs |  1.42×  |
+| ChatEvent                |  4.61 µs | 3.29 µs |  1.40×  |
+
+**28/28 event types parsed with zero type-name mismatches.**
+
+> **Note:** `GetRoomUsersResponse` with tuple content is a known cattrs limitation in the official SDK (`ClassValidationError`). The custom SDK parses it cleanly (20.27 µs for 5 users, 73.79 µs for 20 users).
+
+### Round-Trip & Sustained Load
+
+| Metric                                  | Value                                       |
+| --------------------------------------- | ------------------------------------------- |
+| Full round-trip (dict→encode→decode→dict) | 1.55 µs avg (644,094 ops/s)                |
+| Large payload round-trip (50 KB)        | 85.58 µs                                    |
+| Encode-only                             | 738 ns avg                                  |
+| Decode-only                             | 1.29 µs avg                                 |
+| Sustained parse load (10 s)             | 2,711,400 ops, 271,139 ops/s, 0 errors      |
+| p50 under sustained load                | 3.30 µs                                     |
+| p95 under sustained load                | 4.20 µs                                     |
+| p99 under sustained load                | 5.50 µs                                     |
+
+### Memory & Import
+
+| Metric                    | Official | Custom  | Notes                                   |
+| ------------------------- | -------: | ------: | --------------------------------------- |
+| Import time (warm)        | 0.005 ms | 30.8 ms | First load pays orjson C-extension cost |
+| Import memory (peak)      |    0.0 B |  1.1 MB | orjson is a compiled extension          |
+| Object memory (Position)  |     72 B |    56 B | 16 B smaller per object                 |
+| Object memory (Item)      |     80 B |    72 B | 8 B smaller per object                  |
+| Object memory (User)      |     56 B |    56 B | Identical                               |
+| Registry leak (200 cancelled) |     0 |       0 | Both clean                              |
+| Fire-and-forget leak (200)    |   —   | 0 pending | Clean                                 |
+| GC collections (10K parses)   |   —   |       0 | Zero GC pressure                        |
+| Object growth (5K parses)     |   —   |      −3 | No growth; slight net collection        |
+
+### JSON Backend Comparison
+
+| Backend        | Serialization | Deserialization |
+| -------------- | ------------: | --------------: |
+| stdlib `json`  |       5.62 µs |         4.77 µs |
+| `ujson`        |       1.66 µs |               — |
+| `orjson`       |        590 ns |         1.20 µs |
+| **orjson speedup vs stdlib** | **9.52×** | **3.97×** |
+
+### Type Safety
+
+| Test Case                   | Official  | Custom    |
+| --------------------------- | --------- | --------- |
+| Valid ChatEvent             | ACCEPT ✓  | ACCEPT ✓  |
+| ChatEvent: user wrong type  | REJECT ✓  | ACCEPT ✓  |
+| ChatEvent: missing message  | REJECT ✓  | ACCEPT ✓  |
+| Valid Error                 | ACCEPT ✓  | ACCEPT ✓  |
+| Error: missing message      | REJECT ✓  | ACCEPT ✓  |
+| Malformed JSON rejection    | ✓         | 6/6 handled |
+| Unknown `_type` handling    | —         | 4/4 handled |
+
+`highrise_fast` intentionally favors **throughput over strict validation** — it never crashes on malformed input and fills sensible defaults for missing fields. If you need strict type enforcement, use the official SDK or add Pydantic validation on top.
+
+---
+
+## Feature Parity
+
+| Feature                                       | Official | highrise_fast            |
+| --------------------------------------------- | -------- | ------------------------ |
+| `Highrise` class methods                      | 34       | 35 (+`fail_pending`)     |
+| `BaseBot` event handlers                      | 13       | 13 (identical)           |
+| Model classes                                 | 12       | 12 + `Message`, `Conversation`, `RoomInfo` |
+| Request types (wire-verified)                 | 41       | 41 (0 mismatches)        |
+| Event types (type-verified)                   | 28       | 28 (0 mismatches)        |
+| No `attrs` / `cattrs` dependency              | ✗        | ✓                        |
+| `orjson` fast path                            | ✗        | ✓                        |
+| `finally`-based cleanup                       | ✗        | ✓                        |
+| Built-in telemetry                            | ✗        | ✓                        |
+| Handles `GetRoomUsersResponse` (tuple content)| ✗ (`ClassValidationError`) | ✓          |
+
+---
+
+## When to Use This SDK
+
+| Use Case                                                        | Recommendation  |
+| --------------------------------------------------------------- | --------------- |
+| High-throughput rooms (many players, frequent events)           | `highrise_fast` |
+| Latency-sensitive commands (games, reactions)                   | `highrise_fast` |
+| Memory-constrained environments (small VPS, containers)         | `highrise_fast` |
+| Strict type validation required (production data pipelines)     | Official SDK    |
+| Official support & long-term stability                          | Official SDK    |
+| Rapid prototyping (no dependency management)                    | `highrise_fast` |
+
+---
+
+## Project Structure
+
+```text
 highrise_fast/
 ├── __init__.py          # Core SDK: Highrise class, BaseBot, event dispatch, serialization
 ├── __main__.py          # CLI entry point: python -m highrise_fast
 ├── models.py            # Dataclasses: User, Position, Item, Message, Conversation, etc.
 ├── models_webapi.py     # WebAPI response parsing
 └── compat_requests.py   # Compatibility shims for official SDK request classes
-Environment Variables
-Variable	Default	Purpose
-HR_BOTAPI_URL	wss://highrise.game/web/botapi	WebSocket endpoint
-HR_WEBAPI_URL	https://webapi.highrise.game	Web API endpoint
-HR_READ_TIMEOUT	60	WebSocket read timeout (seconds)
-HR_WEBAPI_TIMEOUT	30	HTTP timeout (seconds)
-HR_FAST_FIRE_AND_FORGET	0	Set 1 to skip response waiting
-HR_SDK_NAME	highrise-fast	SDK name in user-agent
-HR_SDK_USER_AGENT	highrise-fast/1.0.0	Full user-agent string
-SDK_FAST_REQ_TIMEOUT	0	Request timeout override
-Security
-See SECURITY.md for supported versions and vulnerability reporting.
+```
 
-⚠️ Important: This is an unofficial SDK and is not affiliated with, endorsed by, or supported by Highrise or Pocket Worlds. Use at your own risk. Never commit API tokens to version control.
+---
 
-License
-This project is released under a custom license. See LICENSE.md for full terms. The license is not MIT, Apache, BSD, or GPL — it has its own conditions around usage, redistribution, and attribution.
+## Environment Variables
 
-If you are unsure whether your intended use is permitted, read LICENSE.md in full before using, forking, or redistributing this code.
+| Variable                | Default                            | Purpose                                |
+| ----------------------- | ---------------------------------- | -------------------------------------- |
+| `HR_BOTAPI_URL`         | `wss://highrise.game/web/botapi`   | WebSocket endpoint                     |
+| `HR_WEBAPI_URL`         | `https://webapi.highrise.game`     | Web API endpoint                       |
+| `HR_READ_TIMEOUT`       | `60`                               | WebSocket read timeout (seconds)       |
+| `HR_WEBAPI_TIMEOUT`     | `30`                               | HTTP timeout (seconds)                 |
+| `HR_FAST_FIRE_AND_FORGET` | `0`                              | Set to `1` to skip response waiting    |
+| `HR_SDK_NAME`           | `highrise-fast`                    | SDK name in user-agent                 |
+| `HR_SDK_USER_AGENT`     | `highrise-fast/1.0.0`              | Full user-agent string                 |
+| `SDK_FAST_REQ_TIMEOUT`  | `0`                                | Request timeout override               |
 
-Credits
-Wire protocol documentation: Highrise Creator Docs
+---
 
-orjson by ijl
+## Security
 
-Official SDK by Pocket Worlds
+See [`SECURITY.md`](SECURITY.md) for supported versions and vulnerability reporting.
 
-<p align="center"> <b>Built for speed. Audited for correctness. Zero monkey-patching.</b><br> <i>If you need maximum throughput and are comfortable maintaining it yourself, this SDK is for you.</i> </p> ```
+> ⚠️ **Important:** This is an **unofficial SDK** and is not affiliated with, endorsed by, or supported by Highrise or Pocket Worlds. Use at your own risk. **Never commit API tokens to version control.**
+
+---
+
+## License
+
+This project is released under a **custom license**. See [`LICENSE.md`](LICENSE.md) for full terms.
+
+The license is **not** MIT, Apache, BSD, or GPL — it has its own conditions around usage, redistribution, and attribution.
+
+If you are unsure whether your intended use is permitted, read `LICENSE.md` in full before using, forking, or redistributing this code.
+
+---
+
+## Credits
+
+- Wire protocol documentation: [Highrise Creator Docs](https://create.highrise.game/)
+- [orjson](https://github.com/ijl/orjson) by ijl
+- Official SDK by Pocket Worlds
+
+---
+
+<p align="center">
+  <b>Built for speed. Audited for correctness. Zero monkey-patching.</b><br>
+  <i>If you need maximum throughput and are comfortable maintaining it yourself, this SDK is for you.</i>
+</p>
