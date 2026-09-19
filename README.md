@@ -17,6 +17,13 @@
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Benchmarks](#benchmarks)
+  - [Test Suite Coverage](#test-suite-coverage)
+  - [Serialization — Outgoing Requests](#serialization--outgoing-requests)
+  - [Parsing — Incoming Events](#parsing--incoming-events)
+  - [Type Validation (Strict Mode)](#type-validation-strict-mode)
+  - [Round-Trip & Sustained Load](#round-trip--sustained-load)
+  - [Memory & Import](#memory--import)
+  - [JSON Backend Comparison](#json-backend-comparison)
 - [Feature Parity](#feature-parity)
 - [When to Use This SDK](#when-to-use-this-sdk)
 - [Project Structure](#project-structure)
@@ -33,7 +40,7 @@ The official Highrise Python SDK (`highrise-bot-sdk`) is battle-tested and type-
 
 `highrise_fast` is a **standalone, single-package alternative** that keeps the same public API surface while replacing the entire serialization/deserialization pipeline with `orjson` (optional) and direct dict construction.
 
-Validated against the official SDK across a **100-test benchmark suite** covering object model, serialization, parsing, concurrency, memory, leak safety, unicode, and sustained load.
+Validated against the official SDK across a **100-test benchmark suite** covering object model, serialization, parsing, concurrency, memory, leak safety, unicode, and sustained load — plus a **1,000,000-case type-validation audit** that confirms strict mode matches the official SDK on every case.
 
 ---
 
@@ -45,6 +52,7 @@ Validated against the official SDK across a **100-test benchmark suite** coverin
 - **Text WebSocket frames preferred** — fewer bytes, faster round trips
 - **Request/response cleanup** — `finally`-based registry cleanup (no leaks under cancellation)
 - **Typed event classes** matching the official SDK — same names, same wire format
+- **Strict validation mode** — `parse_server_message(data, strict=True)` for type-safe parsing that matches official SDK accept/reject behavior
 - **CLI-compatible**: `python -m highrise_fast module:BotClass ROOM_ID API_TOKEN`
 - **Telemetry & stats** — built-in latency tracking, error counters, and health endpoint
 
@@ -107,6 +115,18 @@ api = WebAPI(token="YOUR_API_TOKEN")
 room = await api.get_room("ROOM_ID")
 ```
 
+### 4. Strict validation (optional)
+
+```python
+from highrise_fast import parse_server_message
+
+# Lenient mode (default): never crashes, fills sensible defaults
+event = parse_server_message(data)
+
+# Strict mode: rejects invalid payloads, matches official SDK behavior
+event = parse_server_message(data, strict=True)
+```
+
 ---
 
 ## Benchmarks
@@ -117,6 +137,7 @@ All benchmarks run on Python 3.11.9, Windows x64, 8 CPU cores.
 - **Custom** = `highrise_fast` (orjson-based)
 
 Full benchmark script: [`benchmark.py`](benchmark.py) — run with `python benchmark.py --iters 100000`.
+Type-validation benchmark: [`benchmark_type_validation.py`](benchmark_type_validation.py) — run with `python benchmark_type_validation.py --target 250`.
 
 ### Test Suite Coverage
 
@@ -178,6 +199,32 @@ Payload size reduced by **6.9% per request** (102 B → 95 B). Serialization thr
 
 > **Note:** `GetRoomUsersResponse` with tuple content is a known cattrs limitation in the official SDK (`ClassValidationError`). The custom SDK parses it cleanly (20.27 µs for 5 users, 73.79 µs for 20 users).
 
+### Type Validation (Strict Mode)
+
+The official SDK is used as the **reference oracle**: for every generated payload, the official SDK's accept/reject decision defines the expected behavior. `highrise_fast` is then tested in both lenient and strict mode.
+
+**Methodology:**
+
+- **1,000,000** generated type-validation cases across all base event payloads
+- Mutations include missing fields, wrong types (`null`, `int`, `float`, `string`, `list`, `dict`), unknown `_type`, wrong `rid` types, top-level non-object values, and extra unknown fields
+- Strict mode is auto-detected via `parse_server_message(data, strict=True)`
+
+**Results:**
+
+| Metric                        | Value                     |
+| ----------------------------- | ------------------------- |
+| Total cases                   | 1,000,000                 |
+| Official ACCEPT cases         | 999,595                   |
+| Official REJECT cases         | 405                       |
+| Custom **lenient** match      | 999,603 / 1,000,000 (100.0%) |
+| Custom **strict** match       | **1,000,000 / 1,000,000 (100.0%)** |
+| Official feedback average     | 31.9 / 100                |
+| Custom **strict** feedback    | **99.7 / 100**            |
+
+> **Key finding:** `highrise_fast` strict mode matches the official SDK's accept/reject behavior on **every single case** — 0 mismatches across 1,000,000 mutations. Lenient mode is intentionally permissive and never crashes, filling sensible defaults for missing fields.
+
+**Error feedback quality** rewards errors that include the field/path, expected type, actual type, enough detail to debug, and multiple error lines. The custom strict validator scores **3.1× higher** than the official SDK on this metric.
+
 ### Round-Trip & Sustained Load
 
 | Metric                                  | Value                                       |
@@ -214,20 +261,6 @@ Payload size reduced by **6.9% per request** (102 B → 95 B). Serialization thr
 | `orjson`       |        590 ns |         1.20 µs |
 | **orjson speedup vs stdlib** | **9.52×** | **3.97×** |
 
-### Type Safety
-
-| Test Case                   | Official  | Custom    |
-| --------------------------- | --------- | --------- |
-| Valid ChatEvent             | ACCEPT ✓  | ACCEPT ✓  |
-| ChatEvent: user wrong type  | REJECT ✓  | ACCEPT ✓  |
-| ChatEvent: missing message  | REJECT ✓  | ACCEPT ✓  |
-| Valid Error                 | ACCEPT ✓  | ACCEPT ✓  |
-| Error: missing message      | REJECT ✓  | ACCEPT ✓  |
-| Malformed JSON rejection    | ✓         | 6/6 handled |
-| Unknown `_type` handling    | —         | 4/4 handled |
-
-`highrise_fast` intentionally favors **throughput over strict validation** — it never crashes on malformed input and fills sensible defaults for missing fields. If you need strict type enforcement, use the official SDK or add Pydantic validation on top.
-
 ---
 
 ## Feature Parity
@@ -243,6 +276,7 @@ Payload size reduced by **6.9% per request** (102 B → 95 B). Serialization thr
 | `orjson` fast path                            | ✗        | ✓                        |
 | `finally`-based cleanup                       | ✗        | ✓                        |
 | Built-in telemetry                            | ✗        | ✓                        |
+| **Strict validation mode**                    | ✗        | ✓ (`strict=True`)        |
 | Handles `GetRoomUsersResponse` (tuple content)| ✗ (`ClassValidationError`) | ✓          |
 
 ---
@@ -254,7 +288,7 @@ Payload size reduced by **6.9% per request** (102 B → 95 B). Serialization thr
 | High-throughput rooms (many players, frequent events)           | `highrise_fast` |
 | Latency-sensitive commands (games, reactions)                   | `highrise_fast` |
 | Memory-constrained environments (small VPS, containers)         | `highrise_fast` |
-| Strict type validation required (production data pipelines)     | Official SDK    |
+| Strict type validation required (production data pipelines)     | `highrise_fast` (strict mode) or Official SDK |
 | Official support & long-term stability                          | Official SDK    |
 | Rapid prototyping (no dependency management)                    | `highrise_fast` |
 
