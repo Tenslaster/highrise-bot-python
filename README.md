@@ -1,23 +1,4 @@
-#!/usr/bin/env python3
-"""
-generate_readme.py — Writes README.md for highrise-bot-python.
-
-Usage:
-    python generate_readme.py
-    python generate_readme.py --output README.md
-    python generate_readme.py --output ../README.md --force
-
-The README content is stored as a single triple-quoted string below.
-Edit the README_TEXT constant to update the content.
-"""
-
-from __future__ import annotations
-
-import argparse
-import sys
-from pathlib import Path
-
-README_TEXT = """# highrise-bot-python
+# highrise-bot-python
 
 **Unofficial, production-oriented Python SDK for Highrise bots** — a drop-in replacement for the official `highrise-bot-sdk` that delivers **6–14× faster serialization**, **1.4–3.3× faster parsing**, and **zero dependency on `attrs`, `cattrs`, or `pendulum`**.
 
@@ -241,4 +222,4 @@ orjson by ijl
 
 Official SDK by Pocket Worlds
 
-<p align="center"> <b>Built for speed. Audited for correctness. Zero monkey-patching.</b><br> <i>If you need maximum throughput and are comfortable maintaining it yourself, this SDK is for you.</i> </p> """
+<p align="center"> <b>Built for speed. Audited for correctness. Zero monkey-patching.</b><br> <i>If you need maximum throughput and are comfortable maintaining it yourself, this SDK is for you.</i> </p> ```
