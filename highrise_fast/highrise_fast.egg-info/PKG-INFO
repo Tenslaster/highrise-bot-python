@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: highrise-fast
+Version: 1.0.0
+Summary: Custom high-performance standalone Highrise SDK
+Requires-Python: >=3.11
+Requires-Dist: aiohttp
+Requires-Dist: orjson
+Requires-Dist: quattro
