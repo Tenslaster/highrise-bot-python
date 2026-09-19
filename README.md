@@ -3,10 +3,10 @@
 **Unofficial, production-oriented Python SDK for Highrise bots** — a drop-in replacement for the official `highrise-bot-sdk` that delivers up to **14.9× faster serialization**, **3.5× faster parsing**, and **zero dependency on `attrs`, `cattrs`, or `pendulum`**.
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: Custom](https://img.shields.io/badge/License-Custom-red.svg)](LICENSE.md)
 [![orjson: optional](https://img.shields.io/badge/orjson-optional-brightgreen)](https://github.com/ijl/orjson)
 
----
+
 
 ## Why This Exists
 
