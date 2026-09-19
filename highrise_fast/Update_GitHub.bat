@@ -4,7 +4,7 @@ git clone https://github.com/Tenslaster/highrise-bot-python.git hbp_push
 cd hbp_push
 rmdir /s /q highrise_fast
 mkdir highrise_fast
-robocopy "C:\Users\cedri\OneDrive\Bureau\RADIOS\HIGHRISE_SDK" highrise_fast /E /XD .git
+robocopy "C:\Users\cedri\OneDrive\Bureau\RADIOS\HIGHRISE_SDK" highrise_fast /E /XD .git __pycache__ /XF *.pyc
 git add -A
 git commit -m "Update highrise_fast"
 git push origin main

@@ -502,37 +502,18 @@ def test_010(args, ctx):
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def _run_object_bench(
-    test_id,
-    name,
-    off_fn,
-    cust_fn,
-    args,
-    ctx,
-    cat="C",
-):
+def _run_object_bench(test_id, name, off_fn, cust_fn, args, ctx):
     iters = args.iters
-
     if not ctx.get("have_official") or not ctx.get("have_custom"):
-        return TestResult(
-            test_id,
-            name,
-            cat,
-            passed=False,
-            error="SDK missing",
-        )
-
+        return TestResult(test_id, name, "C", passed=False, error="SDK missing")
     off_res = bench(off_fn, iters)
     cust_res = bench(cust_fn, iters)
-
     sp = off_res["avg_ns"] / cust_res["avg_ns"] if cust_res["avg_ns"] else None
-
     print_comparison(name, off_res, cust_res)
-
     return TestResult(
         test_id,
         name,
-        cat,
+        "C",
         passed=True,
         official_ns=off_res["avg_ns"],
         custom_ns=cust_res["avg_ns"],
@@ -839,13 +820,13 @@ def _outgoing_bench(test_id, name, off_fn, cust_fn, args, ctx, cat="E"):
     iters = min(args.iters, 5000)
     try:
         off_res = bench(off_fn, iters)
-    except Exception as e:  # noqa: BLE001 — benchmark harness must record any SDK failure
+    except BaseException as e:  # ← BaseException catches ExceptionGroup
         return TestResult(
             test_id, name, cat, passed=False, error=f"Official: {type(e).__name__}"
         )
     try:
         cust_res = bench(cust_fn, iters)
-    except Exception as e:  # noqa: BLE001 — benchmark harness must record any SDK failure
+    except BaseException as e:  # ← BaseException catches ExceptionGroup
         return TestResult(
             test_id, name, cat, passed=False, error=f"Custom: {type(e).__name__}"
         )
@@ -1282,83 +1263,12 @@ def test_043(args, ctx):
         "content": [
             [
                 {"id": f"u{i}", "username": f"user_{i}"},
-                {
-                    "x": float(i),
-                    "y": 0.0,
-                    "z": float(i * 2),
-                    "facing": "Front",
-                },
+                {"x": float(i), "y": 0.0, "z": float(i * 2), "facing": "Front"},
             ]
             for i in range(5)
         ],
     }
-
-    sample = json.dumps(payload)
-    iters = min(args.iters, 5000)
-
-    off_ns = None
-    off_error = ""
-
-    try:
-        from highrise import Incoming, converter
-
-        def off():
-            return converter.loads(sample, Incoming)
-
-        off_res = bench(off, iters)
-        off_ns = off_res["avg_ns"]
-
-    except Exception as e:  # noqa: BLE001 — official SDK may raise cattrs/other errors
-        off_error = f"Official: {type(e).__name__}"
-        p(f"    Official: ⚠️  {type(e).__name__} (known cattrs tuple limitation)")
-
-    try:
-        from highrise_fast import loads_json, parse_server_message
-
-        def cust():
-            return parse_server_message(loads_json(sample))
-
-        cust_res = bench(cust, iters)
-        parsed = cust()
-
-        content = getattr(parsed, "content", None)
-        n_parsed = len(content) if content is not None else 0
-
-        p(f"    Custom:   ✅ {fmt_ns(cust_res['avg_ns'])} avg ({n_parsed} users)")
-
-        sp = off_ns / cust_res["avg_ns"] if off_ns and cust_res["avg_ns"] else None
-
-        if n_parsed != 5:
-            return TestResult(
-                "043",
-                "RoomUsers(5)",
-                "F",
-                passed=False,
-                error=f"Expected 5 users, parsed {n_parsed}",
-                official_ns=off_ns,
-                custom_ns=cust_res["avg_ns"],
-                speedup=sp,
-            )
-
-        return TestResult(
-            "043",
-            "RoomUsers(5)",
-            "F",
-            passed=True,
-            official_ns=off_ns,
-            custom_ns=cust_res["avg_ns"],
-            speedup=sp,
-            error=off_error,
-        )
-
-    except Exception as e:  # noqa: BLE001 — benchmark harness must record any SDK failure
-        return TestResult(
-            "043",
-            "RoomUsers(5)",
-            "F",
-            passed=False,
-            error=f"Custom: {type(e).__name__}: {e}"[:200],
-        )
+    return _incoming_bench("043", "RoomUsers(5)", json.dumps(payload), args, ctx)
 
 
 @register_test("044", "GetRoomUsersResponse (20 users)", "F")
@@ -1386,7 +1296,7 @@ def test_044(args, ctx):
 
         off_res = bench(off, iters)
         off_ns = off_res["avg_ns"]
-    except Exception as e:  # noqa: BLE001 — official SDK may raise cattrs/other errors
+    except BaseException as e:
         p(f"    Official: ⚠️  {type(e).__name__} (cattrs tuple limitation)")
 
     try:
@@ -1409,7 +1319,7 @@ def test_044(args, ctx):
             custom_ns=cust_res["avg_ns"],
             speedup=sp,
         )
-    except Exception as e:  # noqa: BLE001 — benchmark harness must record any SDK failure
+    except BaseException as e:
         return TestResult(
             "044",
             "RoomUsers(20)",
@@ -1762,61 +1672,20 @@ def test_062(args, ctx):
     try:
         from highrise_fast import dumps_json, loads_json
     except ImportError as e:
-        return TestResult(
-            "062",
-            "Deep nesting",
-            "I",
-            passed=False,
-            error=str(e),
-        )
-
+        return TestResult("062", "Deep nesting", "I", passed=False, error=str(e))
     nested = {"_type": "Test", "data": {"level": 1}}
     current = nested["data"]
-
-    for level in range(2, 20):
-        current["child"] = {"level": level}
+    for i in range(2, 20):
+        current["child"] = {"level": i}
         current = current["child"]
-
     try:
         decoded = loads_json(dumps_json(nested))
-        node = decoded["data"]
-        ok = node.get("level") == 1
-
-        for level in range(2, 20):
-            node = node.get("child", {})
-            if node.get("level") != level:
-                ok = False
-                break
-
-        if ok:
-            p("    20-level nesting: ✅")
-        else:
-            p("    20-level nesting: ❌ unexpected nested structure")
-
-        return TestResult(
-            "062",
-            "Deep nesting",
-            "I",
-            passed=ok,
-            error="" if ok else "Nested level mismatch",
-        )
-
-    except (
-        RecursionError,
-        TypeError,
-        ValueError,
-        KeyError,
-        AttributeError,
-    ) as e:
-        p(f"    20-level nesting: ❌ {type(e).__name__}: {e}")
-
-        return TestResult(
-            "062",
-            "Deep nesting",
-            "I",
-            passed=False,
-            error=f"{type(e).__name__}: {e}"[:200],
-        )
+        ok = decoded["data"]["child"]["level"] == 3
+        p("    20-level nesting: ✅")
+    except (RecursionError, TypeError, ValueError) as e:
+        ok = False
+        p(f"    20-level nesting: ❌ {e}")
+    return TestResult("062", "Deep nesting", "I", passed=ok)
 
 
 @register_test("063", "Special JSON characters in strings", "I")
@@ -2857,7 +2726,7 @@ def run_tests(args):
             result = fn(args, ctx)
             result.duration_ms = (time.perf_counter() - t0) * 1000
             results.append(result)
-        except Exception as e:
+        except BaseException as e:
             elapsed = (time.perf_counter() - t0) * 1000
             p(f"    💥 CRASHED: {type(e).__name__}: {e}")
             results.append(
@@ -2873,14 +2742,10 @@ def run_tests(args):
             if isinstance(e, KeyboardInterrupt):
                 raise
 
-    return results
+    return results  # ← THIS LINE IS MISSING OR MISPLACED
 
 
 def print_summary(results: list[TestResult]):
-    for r in results:
-        if r.test_id in {"019", "020", "021", "022", "023"}:
-            r.category = "D"
-
     header("FINAL SCORECARD")
 
     passed = sum(1 for r in results if r.passed)

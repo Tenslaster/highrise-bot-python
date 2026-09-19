@@ -254,6 +254,7 @@ __all__ = [
     "enable",
     "fast_enabled",
     "gather_subscriptions",
+    "get_encoder_for",
     "get_sdk_module",
     "health",
     "install",
@@ -264,7 +265,6 @@ __all__ = [
     "setup_logging",
     "stats",
     "uninstall",
-    "get_encoder_for",
 ]
 
 KEEPALIVE_RATE = 15
@@ -546,6 +546,7 @@ def dumps_json(payload: dict[str, Any]) -> bytes:
         ensure_ascii=False,
     ).encode("utf-8")
 
+
 def get_encoder_for(type_name: str) -> Callable[[dict[str, Any]], bytes]:
     """Return an optimized JSON encoder for a specific outgoing message type.
 
@@ -554,6 +555,7 @@ def get_encoder_for(type_name: str) -> Callable[[dict[str, Any]], bytes]:
     unified dumps_json which handles all types via _json_default.
     """
     return dumps_json
+
 
 def loads_json(raw: Any) -> Any:
     if raw is None:
@@ -1034,6 +1036,80 @@ def parse_server_message(data: dict[str, Any]) -> Any:
         return types.SimpleNamespace(**data)
     except TypeError:
         return data
+
+
+# ═══════════════════════════════════════════════════════════════
+# HRF STRICT VALIDATION INTEGRATION
+# ═══════════════════════════════════════════════════════════════
+import os as _hrf_os
+
+from .validation import (
+    HighriseFastValidationError as _HighriseFastValidationError,
+)
+from .validation import (
+    ValidationErrorDetail as _ValidationErrorDetail,
+)
+from .validation import (
+    validate_server_message as _hrf_validate_server_message,
+)
+
+HighriseFastValidationError = _HighriseFastValidationError
+ValidationErrorDetail = _ValidationErrorDetail
+validate_server_message = _hrf_validate_server_message
+
+_hrf_original_parse_server_message = parse_server_message
+_hrf_default_strict_backend = _hrf_os.getenv(
+    "HIGHRISE_FAST_STRICT_BACKEND",
+    "native",
+)
+
+
+def parse_server_message(
+    data,
+    *args,
+    strict: bool = False,
+    strict_backend: str | None = None,
+    **kwargs,
+):
+    """
+    highrise_fast message parser.
+
+    Default mode remains lenient and fast:
+
+        parse_server_message(payload)
+
+    Strict mode:
+
+        parse_server_message(payload, strict=True)
+
+    Strict backends:
+
+        native    -> use only highrise_fast native validators
+        official  -> disabled in native build
+    """
+    if strict:
+        backend = strict_backend or _hrf_default_strict_backend
+
+        _hrf_validate_server_message(
+            data,
+            official_oracle=False,
+        )
+
+    return _hrf_original_parse_server_message(data, *args, **kwargs)
+
+try:
+    __all__ = list(__all__)
+except NameError:
+    __all__ = []
+
+for _hrf_name in (
+    "HighriseFastValidationError",
+    "ValidationErrorDetail",
+    "validate_server_message",
+    "parse_server_message",
+):
+    if _hrf_name not in __all__:
+        __all__.append(_hrf_name)
 
 
 def position_to_wire(pos: Any) -> dict[str, Any]:

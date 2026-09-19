@@ -4,6 +4,7 @@ highrise_fast/__main__.py
 highrise_fast/compat_requests.py
 highrise_fast/models.py
 highrise_fast/models_webapi.py
+highrise_fast/validation.py
 highrise_fast.egg-info/PKG-INFO
 highrise_fast.egg-info/SOURCES.txt
 highrise_fast.egg-info/dependency_links.txt
