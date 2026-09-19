@@ -1097,6 +1097,7 @@ def parse_server_message(
 
     return _hrf_original_parse_server_message(data, *args, **kwargs)
 
+
 try:
     __all__ = list(__all__)
 except NameError:
