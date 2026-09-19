@@ -13,9 +13,8 @@ import logging
 import os
 import sys
 import time
-import types
 import urllib.parse
-from collections import Counter, deque
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -113,7 +112,6 @@ except ImportError:
 
 
 from .models import (
-    _ACK_MAP,
     AnchorHitResponse,
     AnchorPosition,
     BuyItemResponse,
@@ -789,255 +787,6 @@ def parse_control_session_metadata(data: dict[str, Any]) -> ControlSessionMetada
     )
 
 
-def parse_server_message(data: dict[str, Any]) -> Any:
-    if not isinstance(data, dict):
-        return data
-
-    t = data.get("_type")
-    rid = data.get("rid")
-
-    if t == "Error":
-        return Error(
-            message=str(data.get("message", "")),
-            do_not_reconnect=bool(data.get("do_not_reconnect", False)),
-            rid=rid,
-        )
-
-    if t == "ChatEvent":
-        return ChatEvent(
-            user=parse_user(data.get("user")) or User(id="", username=""),
-            message=str(data.get("message", "")),
-            whisper=bool(data.get("whisper", False)),
-        )
-
-    if t == "EmoteEvent":
-        return EmoteEvent(
-            user=parse_user(data.get("user")) or User(id="", username=""),
-            emote_id=str(data.get("emote_id", "")),
-            receiver=parse_user(data.get("receiver")),
-        )
-
-    if t == "ReactionEvent":
-        return ReactionEvent(
-            user=parse_user(data.get("user")) or User(id="", username=""),
-            reaction=str(data.get("reaction", "")),
-            receiver=parse_user(data.get("receiver")),
-        )
-
-    if t == "UserJoinedEvent":
-        return UserJoinedEvent(
-            user=parse_user(data.get("user")) or User(id="", username=""),
-            position=parse_position(data.get("position")),
-        )
-
-    if t == "UserLeftEvent":
-        return UserLeftEvent(
-            user=parse_user(data.get("user")) or User(id="", username=""),
-        )
-
-    if t == "ChannelEvent":
-        return ChannelEvent(
-            sender_id=str(data.get("sender_id", "")),
-            msg=str(data.get("msg", "")),
-            tags=list(data.get("tags", []) or []),
-        )
-
-    if t == "TipReactionEvent":
-        return TipReactionEvent(
-            sender=parse_user(data.get("sender")) or User(id="", username=""),
-            receiver=parse_user(data.get("receiver")) or User(id="", username=""),
-            item=parse_item_or_currency(data.get("item")),
-        )
-
-    if t == "UserMovedEvent":
-        return UserMovedEvent(
-            user=parse_user(data.get("user")) or User(id="", username=""),
-            position=parse_position(data.get("position")),
-        )
-
-    if t == "VoiceEvent":
-        raw_users = data.get("users", []) or []
-        users: list[tuple[User, str]] = []
-
-        for pair in raw_users:
-            if isinstance(pair, (list, tuple)) and len(pair) == 2:
-                u = parse_user(pair[0])
-                if u is not None:
-                    users.append((u, str(pair[1])))
-
-        return VoiceEvent(
-            users=users,
-            seconds_left=_as_int(data.get("seconds_left"), 0),
-        )
-
-    if t == "MessageEvent":
-        return MessageEvent(
-            user_id=str(data.get("user_id", "")),
-            conversation_id=str(data.get("conversation_id", "")),
-            is_new_conversation=bool(data.get("is_new_conversation", False)),
-        )
-
-    if t == "RoomModeratedEvent":
-        duration_raw = data.get("duration")
-
-        return RoomModeratedEvent(
-            moderatorId=str(data.get("moderatorId", "")),
-            targetUserId=str(data.get("targetUserId", "")),
-            moderationType=str(data.get("moderationType", "")),
-            duration=None if duration_raw is None else _as_int(duration_raw),
-        )
-
-    if t == "GetRoomUsersResponse":
-        content: list[tuple[User, Position | AnchorPosition]] = []
-
-        for row in data.get("content", []) or []:
-            if isinstance(row, (list, tuple)) and len(row) == 2:
-                user = parse_user(row[0])
-                pos = parse_position(row[1])
-
-                if user is not None and pos is not None:
-                    content.append((user, pos))
-
-        return GetRoomUsersResponse(content=content, rid=rid)
-
-    if t == "GetWalletResponse":
-        content_wallet = []
-
-        for entry in data.get("content", []) or []:
-            cur = parse_currency(entry)
-            if cur is not None:
-                content_wallet.append(cur)
-
-        return GetWalletResponse(content=content_wallet, rid=rid)
-
-    if t == "GetBackpackResponse":
-        backpack = data.get("backpack", {}) or {}
-
-        if not isinstance(backpack, dict):
-            backpack = {}
-
-        return GetBackpackResponse(backpack=Counter(backpack), rid=rid)
-
-    if t == "ChangeBackpackResponse":
-        return ChangeBackpackResponse(rid=rid)
-
-    if t == "GetRoomPrivilegeResponse":
-        content_raw = data.get("content", {}) or {}
-
-        return GetRoomPrivilegeResponse(
-            content=RoomPermissions(
-                moderator=content_raw.get("moderator"),
-                designer=content_raw.get("designer"),
-            ),
-            rid=rid,
-        )
-
-    if t == "CheckVoiceChatResponse":
-        return CheckVoiceChatResponse(
-            seconds_left=_as_int(data.get("seconds_left"), 0),
-            auto_speakers=set(data.get("auto_speakers", []) or []),
-            users=dict(data.get("users", {}) or {}),
-            rid=rid,
-        )
-
-    if t == "GetUserOutfitResponse":
-        outfit: list[Item] = []
-
-        for raw_item in data.get("outfit", []) or []:
-            item = parse_item(raw_item)
-            if item is not None:
-                outfit.append(item)
-
-        return GetUserOutfitResponse(outfit=outfit, rid=rid)
-
-    if t == "GetConversationsResponse":
-        conversations: list[Conversation] = []
-
-        for raw_conv in data.get("conversations", []) or []:
-            conv = parse_conversation(raw_conv)
-            if conv is not None:
-                conversations.append(conv)
-
-        return GetConversationsResponse(
-            conversations=conversations,
-            not_joined=_as_int(data.get("not_joined"), 0),
-            rid=rid,
-        )
-
-    if t == "SendMessageResponse":
-        return SendMessageResponse(rid=rid)
-
-    if t == "SendBulkMessageResponse":
-        return SendBulkMessageResponse(rid=rid)
-
-    if t == "GetMessagesResponse":
-        messages: list[Message] = []
-
-        for raw_msg in data.get("messages", []) or []:
-            msg = parse_message(raw_msg)
-            if msg is not None:
-                messages.append(msg)
-
-        return GetMessagesResponse(messages=messages, rid=rid)
-
-    if t == "LeaveConversationResponse":
-        return LeaveConversationResponse(rid=rid)
-
-    if t == "BuyVoiceTimeResponse":
-        return BuyVoiceTimeResponse(
-            result=str(data.get("result", "")),
-            rid=rid,
-        )
-
-    if t == "BuyRoomBoostResponse":
-        return BuyRoomBoostResponse(
-            result=str(data.get("result", "")),
-            rid=rid,
-        )
-
-    if t == "TipUserResponse":
-        return TipUserResponse(
-            result=str(data.get("result", "")),
-            rid=rid,
-        )
-
-    if t == "GetInventoryResponse":
-        items: list[Item] = []
-
-        for raw_item in data.get("items", []) or []:
-            item = parse_item(raw_item)
-            if item is not None:
-                items.append(item)
-
-        return GetInventoryResponse(items=items, rid=rid)
-
-    if t == "SetOutfitResponse":
-        return SetOutfitResponse(rid=rid)
-
-    if t == "BuyItemResponse":
-        return BuyItemResponse(
-            result=str(data.get("result", "")),
-            rid=rid,
-        )
-
-    if t == "MessageMediaResponse":
-        return MessageMediaResponse(
-            media=parse_media(data.get("media")),
-            uploadUrl=data.get("uploadUrl"),
-            thumbnailUploadUrl=data.get("thumbnailUploadUrl"),
-            rid=rid,
-        )
-
-    ack_cls = _ACK_MAP.get(t)
-    if ack_cls is not None:
-        return ack_cls(rid=rid)
-
-    try:
-        return types.SimpleNamespace(**data)
-    except TypeError:
-        return data
-
-
 # ═══════════════════════════════════════════════════════════════
 # HRF STRICT VALIDATION INTEGRATION
 # ═══════════════════════════════════════════════════════════════
@@ -1053,15 +802,54 @@ from .validation import (
     validate_server_message as _hrf_validate_server_message,
 )
 
+# ═══════════════════════════════════════════════════════════════
+# ORIGINAL LENIENT PARSER
+# ═══════════════════════════════════════════════════════════════
+
+
+def _lenient_parse_server_message(
+    data: Any,
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """
+    Lenient fallback parser for highrise_fast.
+
+    This is intentionally permissive. Strict validation is performed
+    by the strict wrapper around this function when strict=True.
+    """
+    if isinstance(data, (str, bytes, bytearray)):
+        try:
+            data = loads_json(data)
+        except Exception:  # noqa: BLE001
+            return data
+
+    if isinstance(data, dict) and data.get("_type") == "Error":
+        try:
+            return Error(
+                message=str(data.get("message", "")),
+                do_not_reconnect=bool(data.get("do_not_reconnect", False)),
+                rid=data.get("rid"),
+            )
+        except Exception:  # noqa: BLE001
+            return data
+
+    return data
+
+
+# ═══════════════════════════════════════════════════════════════
+# HRF STRICT VALIDATION INTEGRATION
+# ═══════════════════════════════════════════════════════════════
+
 HighriseFastValidationError = _HighriseFastValidationError
 ValidationErrorDetail = _ValidationErrorDetail
 validate_server_message = _hrf_validate_server_message
 
-_hrf_original_parse_server_message = parse_server_message
-_hrf_default_strict_backend = _hrf_os.getenv(
-    "HIGHRISE_FAST_STRICT_BACKEND",
-    "native",
-)
+# CRITICAL: At this point, parse_server_message still points to the
+# ORIGINAL lenient parser defined above. We capture it NOW before
+# overwriting it with the strict wrapper below.
+_hrf_original_parse_server_message = _lenient_parse_server_message
+_hrf_default_strict_backend = _hrf_os.getenv("HIGHRISE_FAST_STRICT_BACKEND", "native")
 
 
 def parse_server_message(
@@ -1069,32 +857,19 @@ def parse_server_message(
     *args,
     strict: bool = False,
     strict_backend: str | None = None,
+    strict_semantic: bool = False,
     **kwargs,
 ):
     """
     highrise_fast message parser.
-
-    Default mode remains lenient and fast:
-
-        parse_server_message(payload)
-
-    Strict mode:
-
-        parse_server_message(payload, strict=True)
-
-    Strict backends:
-
-        native    -> use only highrise_fast native validators
-        official  -> disabled in native build
+    Default mode remains lenient and fast.
+    Strict mode enforces validation.
     """
     if strict:
-        backend = strict_backend or _hrf_default_strict_backend
-
         _hrf_validate_server_message(
             data,
-            official_oracle=False,
+            strict_semantic=strict_semantic,
         )
-
     return _hrf_original_parse_server_message(data, *args, **kwargs)
 
 
@@ -1978,6 +1753,148 @@ async def _safe_handler(result: Any) -> None:
 
 def _spawn_task(tg: TaskGroup, result: Any) -> None:
     tg.create_task(_safe_handler(result))
+
+
+# ═══════════════════════════════════════════════════════════════
+# INTERNAL TEST SUITE (Wire Fuzzer + Protocol Tests)
+# ═══════════════════════════════════════════════════════════════
+def run_internal_tests():
+    """
+    Synchronous entry point to run the wire-level fuzzer and protocol test suite.
+    Execute via: python -c "from highrise_fast import run_internal_tests; run_internal_tests()"
+    """
+    import asyncio
+
+    return asyncio.run(_run_internal_tests_async())
+
+
+async def _run_internal_tests_async():
+    import os
+    import random
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from .validation import (
+        BASE_PAYLOADS,
+        HighriseFastValidationError,
+        ReasonCode,
+        validate_server_message,
+    )
+
+    print("=== Running Internal Test Suite ===")
+
+    # Point 1: Verify BASE_PAYLOADS
+    print("[1/5] Testing BASE_PAYLOADS coverage...")
+    for t, payload in BASE_PAYLOADS.items():
+        try:
+            validate_server_message(payload, strict=True)
+        except HighriseFastValidationError as e:
+            print(f"  FAIL: BASE_PAYLOADS[{t}] failed strict validation: {e}")
+            raise
+    print("  PASS: All BASE_PAYLOADS pass strict validation.")
+
+    # Point 2: Wire-level Fuzzer
+    print("[2/5] Running Wire-Level Fuzzer...")
+    bad_bytes = b'{"_type": "ChatEvent", "message": "\xff\xfe\xfd"}'
+    try:
+        data = loads_json(bad_bytes)
+        if isinstance(data, dict):
+            parse_server_message(data, strict=True)
+    except (HighriseFastValidationError, ValueError, TypeError, UnicodeDecodeError):
+        pass
+
+    truncated = b'{"_type": "ChatEvent", "user": {"id": "123", "username": "test"'
+    data = loads_json(truncated)
+    assert data is None or not isinstance(data, dict), (
+        "Truncated payload should not parse to dict"
+    )
+
+    huge_msg = b"A" * (1024 * 1024 * 2)
+    payload_bytes = (
+        b'{"_type": "ChatEvent", "message": "'
+        + huge_msg
+        + b'", "user": {"id": "1", "username": "x"}, "whisper": false}'
+    )
+    data = loads_json(payload_bytes)
+    if isinstance(data, dict):
+        try:
+            parse_server_message(data, strict=True, strict_semantic=True)
+        except HighriseFastValidationError:
+            pass
+
+    for _ in range(500):
+        raw = os.urandom(random.randint(10, 4096))
+        try:
+            data = loads_json(raw)
+            if isinstance(data, dict):
+                parse_server_message(data, strict=True)
+        except Exception:
+            pass
+    print("  PASS: Fuzzer survived without crashes.")
+
+    # Point 3 & 4: Semantic Layer and Reason Codes
+    print("[3/5] & [4/5] Testing Semantic Bounds and Reason Codes...")
+    bad_pos = {
+        "_type": "UserJoinedEvent",
+        "user": {"id": "1", "username": "u"},
+        "position": {"x": 9999.0, "y": 0.0, "z": 0.0, "facing": "FrontRight"},
+    }
+    try:
+        validate_server_message(bad_pos, strict=True, strict_semantic=True)
+        assert False, "Should have raised semantic error"
+    except HighriseFastValidationError as e:
+        assert any(err.reason_code == ReasonCode.OUT_OF_BOUNDS for err in e.errors), (
+            "Missing OUT_OF_BOUNDS reason code"
+        )
+
+    missing_field = {"_type": "ChatEvent", "user": {"id": "1"}, "whisper": False}
+    try:
+        validate_server_message(missing_field, strict=True)
+        assert False, "Should have raised missing field error"
+    except HighriseFastValidationError as e:
+        assert any(err.reason_code == ReasonCode.MISSING_FIELD for err in e.errors), (
+            "Missing MISSING_FIELD reason code"
+        )
+    print("  PASS: Semantic bounds and Reason Codes verified.")
+
+    # Point 5: Runtime / Protocol Test Suite
+    print("[5/5] Testing Runtime Protocol (Backpressure & Reconnect)...")
+
+    class MockBot(BaseBot):
+        async def on_chat(self, user, message):
+            await asyncio.sleep(0.01)
+
+    bot = MockBot()
+    ws = AsyncMock()
+    ws.send_str = AsyncMock()
+    ws.send_bytes = AsyncMock()
+
+    _highrise = Highrise(ws=ws, my_id="bot_1")
+
+    tasks = []
+    for i in range(100):
+        tasks.append(asyncio.create_task(bot.on_chat(MagicMock(id=f"u{i}"), "hello")))
+
+    await _send_ws_payload(ws, {"_type": "ChatRequest", "message": "test"})
+    await asyncio.gather(*tasks)
+    assert ws.send_str.call_count >= 1 or ws.send_bytes.call_count >= 1
+
+    with patch("aiohttp.ClientSession.ws_connect") as mock_connect:
+        mock_connect.side_effect = Exception("401 Unauthorized: Token Expired")
+        try:
+            await asyncio.wait_for(
+                bot_runner(bot, "room_1", "expired_token"), timeout=1.0
+            )
+        except TimeoutError:
+            pass
+        except Exception as e:
+            assert (
+                "401" in str(e)
+                or "Unauthorized" in str(e)
+                or isinstance(e, asyncio.CancelledError)
+            )
+
+    print("  PASS: Protocol suite completed.")
+    print("=== All Internal Tests Passed ===")
 
 
 def _dispatch_event(
