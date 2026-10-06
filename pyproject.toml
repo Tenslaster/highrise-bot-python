@@ -1,0 +1,105 @@
+[build-system]
+requires = ["setuptools>=77.0.3", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "highrise-bot-python"
+version = "1.0.0"
+description = "Unofficial high-performance Python SDK for Highrise bots"
+readme = "README.md"
+requires-python = ">=3.11"
+
+# PEP 639: this repository uses a custom, non-OSI license.
+# See LICENSE.md before redistributing or using the software.
+license = "LicenseRef-Tenslaster-Custom"
+license-files = ["LICENSE.md"]
+
+authors = [
+    { name = "Tenslaster" },
+]
+keywords = ["highrise", "bot", "sdk", "async", "aiohttp", "websocket"]
+
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+dependencies = [
+    "aiohttp>=3.9",
+]
+
+[project.optional-dependencies]
+fast = ["orjson>=3.9"]
+full = ["orjson>=3.9"]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "pytest-cov>=5.0",
+    "ruff>=0.4",
+    "mypy>=1.8",
+    "build>=1.0",
+    "twine>=5.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Tenslaster/highrise-bot-python"
+Repository = "https://github.com/Tenslaster/highrise-bot-python"
+Issues = "https://github.com/Tenslaster/highrise-bot-python/issues"
+Changelog = "https://github.com/Tenslaster/highrise-bot-python/releases"
+
+[project.scripts]
+highrise-fast = "highrise_fast:main"
+
+[tool.setuptools.packages.find]
+include = ["highrise_fast*"]
+# Uncomment if you use a src/ layout:
+# where = ["src"]
+
+[tool.setuptools.package-data]
+highrise_fast = ["py.typed"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["highrise_fast"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unused_configs = true
+ignore_missing_imports = true
+show_error_codes = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+
+[tool.coverage.run]
+source = ["highrise_fast"]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
