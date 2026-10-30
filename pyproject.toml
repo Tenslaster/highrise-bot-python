@@ -1,0 +1,92 @@
+[build-system]
+requires = ["setuptools>=77.0.3", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "highrise-bot-python"
+dynamic = ["version"]
+description = "Unofficial, performance-focused Python SDK for Highrise bots"
+readme = "README.md"
+requires-python = ">=3.11"
+
+# PEP 639: this project uses a custom, non-OSI license.
+# See LICENSE.md before redistributing or using the software.
+license = "LicenseRef-Tenslaster-Custom"
+license-files = ["LICENSE.md"]
+
+authors = [{ name = "Tenslaster" }]
+keywords = ["highrise", "bot", "sdk", "async", "aiohttp", "websocket"]
+
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+# aiohttp is imported lazily, so the package can be imported and introspected
+# in environments where it is not installed yet.
+dependencies = ["aiohttp>=3.9"]
+
+[project.optional-dependencies]
+fast = ["orjson>=3.9"]
+full = ["orjson>=3.9"]
+dev = ["ruff>=0.4", "build>=1.0", "twine>=5.0"]
+
+[project.urls]
+Homepage = "https://github.com/Tenslaster/highrise-bot-python"
+Repository = "https://github.com/Tenslaster/highrise-bot-python"
+Issues = "https://github.com/Tenslaster/highrise-bot-python/issues"
+Changelog = "https://github.com/Tenslaster/highrise-bot-python/releases"
+
+[project.scripts]
+highrise-fast = "highrise_fast:main"
+
+# Explicit package list on purpose: a `highrise_fast*` glob would also match a
+# stale duplicate directory and ship it as a second top-level package.
+[tool.setuptools]
+packages = ["highrise_fast"]
+# Off by default: with include-package-data enabled, setuptools sweeps every
+# file under the package directory into the wheel, including editor backups.
+include-package-data = false
+
+[tool.setuptools.dynamic]
+version = { attr = "highrise_fast.__version__" }
+
+[tool.setuptools.package-data]
+highrise_fast = ["py.typed"]
+
+[tool.setuptools.exclude-package-data]
+highrise_fast = ["*.bak", "*.json", "*.txt", ".*/**", "__pycache__/**"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["highrise_fast"]
+extend-exclude = ["build", "dist"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM"]
+# E501 is ignored because the main module contains long log and format strings
+# that predate this config. New code should still wrap at 100 columns.
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# The package entry point imports submodules at the bottom of the file on
+# purpose: the public surface must be fully populated before it is re-exported.
+"highrise_fast/__init__.py" = ["E402", "F403", "N801", "SIM105"]
+"highrise_fast/extras.py" = ["SIM105"]
+# Wire field names are dictated by the Highrise protocol (createdAt,
+# mediaSizeInBytes, moderatorId). Renaming them would break SDK parity.
+"highrise_fast/models.py" = ["N815"]
+"examples/*" = ["E402"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
