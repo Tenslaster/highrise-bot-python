@@ -72,7 +72,7 @@ import weakref
 from collections import Counter, deque
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from enum import Enum
 from inspect import isawaitable, iscoroutine
 from itertools import count
@@ -142,8 +142,7 @@ def _ensure_aiohttp() -> None:
     )
 
 
-TaskGroup = asyncio.TaskGroup
-
+from ._pycompat import BaseExceptionGroup, TaskGroup, TimeoutError, timeout as timeout_after
 from .extras import (
     CommandContext,
     CommandRegistry,
@@ -243,7 +242,8 @@ from .models_webapi import (
     GetPublicUserResponse,
     GetPublicUsersResponse,
     SearchItemsResponse,
-    parse_webapi_response,
+    parse_webapi_response as parse_webapi_response,
+    webapi_response_type,
 )
 
 try:
@@ -257,7 +257,7 @@ except ImportError:  # pragma: no cover - compatibility with older extras
     from .extras import WebAPI as CachedWebAPI  # noqa: F401
 
 
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 
 
 __all__ = [
@@ -1323,10 +1323,16 @@ def parse_session_metadata(data: dict[str, Any]) -> SessionMetadata:
         room_name=str(room_raw.get("room_name", "")),
     )
 
+    raw_rates = data.get("rate_limits") or {}
+    rate_limits = {
+        name: tuple(limit) if isinstance(limit, list) and len(limit) == 2 else limit
+        for name, limit in raw_rates.items()
+    } if isinstance(raw_rates, dict) else {}
+
     return SessionMetadata(
         user_id=str(data.get("user_id", "")),
         room_info=room_info,
-        rate_limits=data.get("rate_limits", {}) or {},
+        rate_limits=rate_limits,
         connection_id=str(data.get("connection_id", "")),
         sdk_version=data.get("sdk_version"),
     )
@@ -2123,7 +2129,7 @@ def invalid_packet_stats() -> dict[str, Any]:
         "total": _STATS["incoming_invalid"],
         "top_offenders": _INVALID_BY_TYPE.most_common(10),
         "last_seen": {
-            k: datetime.fromtimestamp(v, tz=UTC).isoformat()
+            k: datetime.fromtimestamp(v, tz=timezone.utc).isoformat()
             for k, v in _INVALID_LAST_SEEN.items()
         },
     }
@@ -2728,9 +2734,12 @@ class Highrise:
         *,
         timeout: float | None = None,
         raise_on_error: bool = False,
+        request: Any = None,
     ) -> Any:
         """Send a WebSocket RPC call and wait for the response."""
         rid = self._next_rid()
+        if request is not None:
+            request.rid = rid
         payload: dict[str, Any] = {"_type": type_name, "rid": rid}
         if fields:
             payload.update(fields)
@@ -2743,7 +2752,7 @@ class Highrise:
             else self._RPC_HARD_TIMEOUT
         )
         try:
-            async with asyncio.timeout(effective_timeout):
+            async with timeout_after(effective_timeout):
                 await _send_ws_payload(self.ws, payload)
                 response = await future
 
@@ -2777,10 +2786,7 @@ class Highrise:
         if _FIRE_AND_FORGET:
             await self._send_only(type_name, fields)
         else:
-            try:
-                await self._call(type_name, fields, raise_on_error=False)
-            except Exception:
-                log.debug("Fire-and-forget %s failed", type_name, exc_info=True)
+            await self._call(type_name, fields, raise_on_error=True)
 
     async def chat(self, message: str) -> None:
         """Send a chat message."""
@@ -3206,9 +3212,16 @@ class Highrise:
             asyncio.create_task(_delayed())
 
 
+@dataclass(slots=True)
+class _WebPayload:
+    raw: Any
+    parsed: Any = _EXTRAS_MISSING
+
+
 class WebAPI:
     """HTTP client for the public Highrise WebAPI with optional caching."""
     url: str = BASE_WEB_URL
+    _response_type = staticmethod(webapi_response_type)
 
     def __init__(
         self,
@@ -3258,10 +3271,33 @@ class WebAPI:
         return self._session
 
     async def send_request(self, endpoint: str, cl: type | None = None) -> Any:
-        """Send a public WebAPI request."""
-        return await self._get(endpoint)
+        """Send a public Web API request, optionally structuring its response."""
+        payload = await self._get(endpoint)
+        model = self._response_type(endpoint)
+        if cl is not None and cl is not model:
+            return self._structure_response(payload.raw, cl)
+        if payload.parsed is _EXTRAS_MISSING:
+            payload.parsed = self._structure_response(payload.raw, model)
+        return payload.parsed
 
-    async def _get(self, endpoint: str, cache_ttl: int | None = None) -> Any:
+    async def _get_public(self, endpoint: str) -> Any:
+        return await self.send_request(endpoint, self._response_type(endpoint))
+
+    @staticmethod
+    def _structure_response(data: Any, cl: type | None) -> Any:
+        if cl is None:
+            return data
+
+        from .models_webapi import _Base
+
+        if isinstance(cl, type) and issubclass(cl, _Base):
+            return cl(data) if isinstance(data, dict) else data
+
+        from cattrs import structure
+
+        return structure(data, cl)
+
+    async def _get(self, endpoint: str, cache_ttl: int | None = None) -> _WebPayload:
         """Send a GET request to the public WebAPI."""
         ttl = self.cache_ttl if cache_ttl is None else max(0, int(cache_ttl))
         if ttl == 0:
@@ -3279,13 +3315,13 @@ class WebAPI:
             task.add_done_callback(self._request_done)
         return await asyncio.shield(task)
 
-    async def _fetch(self, endpoint: str) -> Any:
+    async def _fetch(self, endpoint: str) -> _WebPayload:
         session = await self._get_session()
 
         async with session.get(f"{self.url}{endpoint}") as response:
             payload = await response.read()
             if response.status == 200:
-                return parse_webapi_response(endpoint, loads_json(payload))
+                return _WebPayload(loads_json(payload))
             raise ResponseError(payload.decode("utf-8", errors="replace"))
 
     async def _fetch_cached(self, endpoint: str, ttl: int) -> Any:
@@ -3357,7 +3393,7 @@ class WebAPI:
 
     async def get_user(self, user_id: str) -> GetPublicUserResponse:
         """Get a public user by ID."""
-        return await self._get("/users/" + urllib.parse.quote(user_id, safe=""))
+        return await self._get_public("/users/" + urllib.parse.quote(user_id, safe=""))
 
     async def get_users(
         self,
@@ -3368,7 +3404,7 @@ class WebAPI:
         username: str | None = None,
     ) -> GetPublicUsersResponse:
         """Get a paginated list of public users."""
-        return await self._get(
+        return await self._get_public(
             "/users"
             + self._query(
                 {
@@ -3437,7 +3473,7 @@ class WebAPI:
 
     async def get_room(self, room_id: str) -> GetPublicRoomResponse:
         """Get a public room by ID."""
-        return await self._get("/rooms/" + urllib.parse.quote(room_id, safe=""))
+        return await self._get_public("/rooms/" + urllib.parse.quote(room_id, safe=""))
 
     async def get_rooms(
         self,
@@ -3449,7 +3485,7 @@ class WebAPI:
         owner_id: str | None = None,
     ) -> GetPublicRoomsResponse:
         """Get a paginated list of public rooms."""
-        return await self._get(
+        return await self._get_public(
             "/rooms"
             + self._query(
                 {
@@ -3465,7 +3501,7 @@ class WebAPI:
 
     async def get_post(self, post_id: str) -> GetPublicPostResponse:
         """Get a public post by ID."""
-        return await self._get("/posts/" + urllib.parse.quote(post_id, safe=""))
+        return await self._get_public("/posts/" + urllib.parse.quote(post_id, safe=""))
 
     async def get_posts(
         self,
@@ -3476,7 +3512,7 @@ class WebAPI:
         author_id: str | None = None,
     ) -> GetPublicPostsResponse:
         """Get a paginated list of public posts."""
-        return await self._get(
+        return await self._get_public(
             "/posts"
             + self._query(
                 {
@@ -3491,7 +3527,7 @@ class WebAPI:
 
     async def get_item(self, item_id: str) -> GetPublicItemResponse:
         """Get a public item by ID."""
-        return await self._get("/items/" + urllib.parse.quote(item_id, safe=""))
+        return await self._get_public("/items/" + urllib.parse.quote(item_id, safe=""))
 
     async def get_items(
         self,
@@ -3506,7 +3542,7 @@ class WebAPI:
         """Get a paginated list of public items."""
         category_value = getattr(category, "value", category)
 
-        return await self._get(
+        return await self._get_public(
             "/items"
             + self._query(
                 {
@@ -3525,13 +3561,13 @@ class WebAPI:
         self, query: str, *, limit: int = 20, skip: int = 0
     ) -> SearchItemsResponse:
         """Search the public item catalog by query with offset pagination."""
-        return await self._get(
+        return await self._get_public(
             "/items/search" + self._query({"query": query, "limit": limit, "skip": skip})
         )
 
     async def get_grab(self, grab_id: str) -> GetPublicGrabResponse:
         """Get a public grab by ID."""
-        return await self._get("/grabs/" + urllib.parse.quote(grab_id, safe=""))
+        return await self._get_public("/grabs/" + urllib.parse.quote(grab_id, safe=""))
 
     async def get_grabs(
         self,
@@ -3542,7 +3578,7 @@ class WebAPI:
         title: str | None = None,
     ) -> GetPublicGrabsResponse:
         """Get a paginated list of public grabs."""
-        return await self._get(
+        return await self._get_public(
             "/grabs"
             + self._query(
                 {
@@ -4640,7 +4676,7 @@ async def bot_runner(bot: BaseBot, room_id: str, api_key: str) -> None:
                                 if actions is not None and hasattr(actions, "start"):
                                     actions.start()
                                 if getattr(bot, "webapi", None) is None:
-                                    bot.webapi = WebAPI()
+                                    bot.webapi = getattr(bot, "_webapi_type", WebAPI)()
                                 if metadata.sdk_version and metadata.sdk_version != VERSION:
                                     log.debug("Server SDK version %s differs from %s", metadata.sdk_version, VERSION)
 
@@ -4650,11 +4686,15 @@ async def bot_runner(bot: BaseBot, room_id: str, api_key: str) -> None:
                                     if first_session:
                                         if tracker is not None:
                                             tg.create_task(_safe_handler(highrise._refresh_room()))
-                                        hook, name = bot.on_start(metadata), "on_start"
-                                        first_session = False
                                     else:
-                                        hook, name = bot.on_reconnected(), "on_reconnected"
-                                    tg.create_task(_safe_handler_with_metrics(hook, name, bot))
+                                        tg.create_task(_safe_handler_with_metrics(
+                                            bot.on_reconnected(), "on_reconnected", bot
+                                        ))
+                                    if first_session or getattr(bot, "_start_each_session", False):
+                                        tg.create_task(_safe_handler_with_metrics(
+                                            bot.on_start(metadata), "on_start", bot
+                                        ))
+                                    first_session = False
                                     _maybe_tune_gc()
                                     if _GC_FIRST_TUNE_TIME is not None and not _GC_FROZEN:
                                         gc_timer = asyncio.get_running_loop().call_later(
@@ -5076,7 +5116,7 @@ def _doctor_check() -> int:
     import platform
     py_ver = platform.python_version()
     print(f"Python: {py_ver} ({platform.python_implementation()})")
-    print("  ✓ Python version OK (3.11+ required)")
+    print("  ✓ Python version OK (3.10+ required)")
 
     try:
         policy = asyncio.get_event_loop_policy()

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from datetime import datetime
-from enum import StrEnum, unique
+from enum import unique
 from typing import Any
+
+from ._pycompat import StrEnum
 
 __all__ = [
 
@@ -780,18 +782,21 @@ _RESPONSE_TYPES = {
 }
 
 
-def parse_webapi_response(endpoint: str, data: Any) -> Any:
-    """Route a public WebAPI JSON payload to the matching response class."""
-    if not isinstance(data, dict):
-        return data
-
+def webapi_response_type(endpoint: str) -> type[_Base] | None:
+    """Find the response model for a known public Web API path."""
     path = endpoint.partition("?")[0].strip("/")
     if path == "items/search":
-        return SearchItemsResponse(data)
+        return SearchItemsResponse
 
     root, _, item_id = path.partition("/")
     models = _RESPONSE_TYPES.get(root)
     if models is not None and "/" not in item_id:
-        return models[bool(item_id)](data)
+        return models[bool(item_id)]
 
-    return data
+    return None
+
+
+def parse_webapi_response(endpoint: str, data: Any) -> Any:
+    """Route a public WebAPI JSON payload to the matching response class."""
+    model = webapi_response_type(endpoint)
+    return model(data) if model is not None and isinstance(data, dict) else data

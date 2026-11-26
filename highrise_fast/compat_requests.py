@@ -1,21 +1,14 @@
-"""Compatibility shims for official request classes.
-
-This module dynamically generates lightweight request classes that mirror the
-official request objects. Each generated class:
-
-* accepts positional arguments in field order;
-* accepts keyword arguments by field name;
-* applies default values for missing fields;
-* exposes the matching response class as ``Response``.
-"""
+"""Typed Bot API request models with their response classes."""
 
 from __future__ import annotations
 
-import logging
-from typing import Any, ClassVar
+from collections import Counter
+from dataclasses import field, make_dataclass
+from typing import Literal
 
 from .models import (
     AnchorHitResponse,
+    AnchorPosition,
     BuyItemResponse,
     BuyRoomBoostResponse,
     BuyVoiceTimeResponse,
@@ -36,13 +29,18 @@ from .models import (
     GetWalletResponse,
     IndicatorResponse,
     InviteSpeakerResponse,
+    Item,
     KeepaliveResponse,
     LeaveConversationResponse,
+    MessageMedia,
     MessageMediaResponse,
     ModerateRoomResponse,
     MoveUserToRoomResponse,
+    Position,
+    Reaction,
     ReactionResponse,
     RemoveSpeakerResponse,
+    RoomPermissions,
     SendBulkMessageResponse,
     SendMessageResponse,
     SetOutfitResponse,
@@ -50,258 +48,144 @@ from .models import (
     TipUserResponse,
 )
 
-__all__: list[str] = []
+_TEXT = Literal["text", "invite"]
+_PAYMENT = Literal["bot_wallet_only"]
+_ACTION = Literal["kick", "ban", "unban", "mute"]
+_USER_ID = ("user_id", str)
+_ROOM_ID = ("room_id", str | None, None)
+_WORLD_ID = ("world_id", str | None, None)
+_DESTINATION = ("destination", Position)
+_RID = ("rid", str | None, None)
 
-logger = logging.getLogger("highrise_fast.compat_requests")
-
-
-class _Request:
-    """Minimal runtime-compatible request object.
-
-    Subclasses declare ``_fields`` and optional ``_defaults``. The
-    constructor maps positional arguments to ``_fields`` in order and
-    keyword arguments by field name.
-    """
-
-    _fields: ClassVar[tuple[str, ...]] = ()
-    _defaults: ClassVar[dict[str, Any]] = {}
-    Response: ClassVar[type[Any] | None] = None
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        """Initialize the request.
-
-        Extra positional args beyond ``_fields`` and unknown kwargs are
-        logged at debug level and ignored (compat-shim leniency).
-        """
-        if len(args) > len(self._fields):
-            logger.debug(
-                "%s: %d positional args provided for %d fields; extras ignored",
-                type(self).__name__,
-                len(args),
-                len(self._fields),
-            )
-
-        values: dict[str, Any] = dict(zip(self._fields, args, strict=False))
-        unknown = set(kwargs) - set(self._fields)
-        if unknown:
-            logger.debug(
-                "%s: unknown kwarg(s) ignored: %s",
-                type(self).__name__,
-                ", ".join(sorted(unknown)),
-            )
-        values.update(kwargs)
-
-        for name in self._fields:
-            if name in values:
-                value = values[name]
-            else:
-                value = self._defaults.get(name)
-                if callable(value):
-                    value = value()
-            setattr(self, name, value)
-
-    def __repr__(self) -> str:
-        """Return a developer-friendly string representation."""
-        parts = [f"{name}={getattr(self, name, None)!r}" for name in self._fields]
-        return f"{type(self).__name__}({', '.join(parts)})"
-
-
-_REQUESTS: tuple[tuple[str, tuple[str, ...], type[Any]], ...] = (
+_REQUESTS = (
     (
         "ChatRequest",
-        ("message", "whisper_target_id", "rid"),
         ChatResponse,
+        (
+            ("message", str),
+            ("whisper_target_id", str | None, None),
+        ),
     ),
-    (
-        "IndicatorRequest",
-        ("icon", "rid"),
-        IndicatorResponse,
-    ),
+    ("IndicatorRequest", IndicatorResponse, (("icon", str | None, None),)),
     (
         "ReactionRequest",
-        ("reaction", "target_user_id", "rid"),
         ReactionResponse,
+        (
+            ("reaction", Reaction),
+            ("target_user_id", str),
+        ),
     ),
     (
         "EmoteRequest",
-        ("emote_id", "target_user_id", "rid"),
         EmoteResponse,
+        (
+            ("emote_id", str),
+            ("target_user_id", str | None, None),
+        ),
     ),
     (
         "ChannelRequest",
-        ("message", "tags", "only_to", "rid"),
         ChannelResponse,
+        (
+            ("message", str),
+            ("tags", set[str], field(default_factory=set)),
+            ("only_to", set[str] | None, None),
+        ),
     ),
-    (
-        "FloorHitRequest",
-        ("destination", "rid"),
-        FloorHitResponse,
-    ),
-    (
-        "TeleportRequest",
-        ("user_id", "destination", "rid"),
-        TeleportResponse,
-    ),
-    (
-        "GetRoomUsersRequest",
-        ("rid",),
-        GetRoomUsersResponse,
-    ),
-    (
-        "GetWalletRequest",
-        ("rid",),
-        GetWalletResponse,
-    ),
-    (
-        "GetRoomPrivilegeRequest",
-        ("user_id", "rid"),
-        GetRoomPrivilegeResponse,
-    ),
+    ("FloorHitRequest", FloorHitResponse, (_DESTINATION,)),
+    ("TeleportRequest", TeleportResponse, (_USER_ID, _DESTINATION)),
+    ("GetRoomUsersRequest", GetRoomUsersResponse, ()),
+    ("GetWalletRequest", GetWalletResponse, ()),
+    ("GetRoomPrivilegeRequest", GetRoomPrivilegeResponse, (_USER_ID,)),
     (
         "ChangeRoomPrivilegeRequest",
-        ("user_id", "permissions", "rid"),
         ChangeRoomPrivilegeResponse,
+        (
+            _USER_ID,
+            ("permissions", RoomPermissions),
+        ),
     ),
     (
         "ModerateRoomRequest",
-        ("user_id", "moderation_action", "action_length", "rid"),
         ModerateRoomResponse,
+        (
+            _USER_ID,
+            ("moderation_action", _ACTION),
+            ("action_length", int | None, None),
+        ),
     ),
-    (
-        "KeepaliveRequest",
-        ("rid",),
-        KeepaliveResponse,
-    ),
-    (
-        "MoveUserToRoomRequest",
-        ("user_id", "room_id", "rid"),
-        MoveUserToRoomResponse,
-    ),
-    (
-        "AnchorHitRequest",
-        ("anchor", "rid"),
-        AnchorHitResponse,
-    ),
-    (
-        "CheckVoiceChatRequest",
-        ("rid",),
-        CheckVoiceChatResponse,
-    ),
-    (
-        "InviteSpeakerRequest",
-        ("user_id", "rid"),
-        InviteSpeakerResponse,
-    ),
-    (
-        "RemoveSpeakerRequest",
-        ("user_id", "rid"),
-        RemoveSpeakerResponse,
-    ),
-    (
-        "GetUserOutfitRequest",
-        ("user_id", "rid"),
-        GetUserOutfitResponse,
-    ),
-    (
-        "GetBackpackRequest",
-        ("user_id", "rid"),
-        GetBackpackResponse,
-    ),
-    (
-        "ChangeBackpackRequest",
-        ("user_id", "changes", "rid"),
-        ChangeBackpackResponse,
-    ),
+    ("KeepaliveRequest", KeepaliveResponse, ()),
+    ("MoveUserToRoomRequest", MoveUserToRoomResponse, (_USER_ID, ("room_id", str))),
+    ("AnchorHitRequest", AnchorHitResponse, (("anchor", AnchorPosition),)),
+    ("CheckVoiceChatRequest", CheckVoiceChatResponse, ()),
+    ("InviteSpeakerRequest", InviteSpeakerResponse, (_USER_ID,)),
+    ("RemoveSpeakerRequest", RemoveSpeakerResponse, (_USER_ID,)),
+    ("GetUserOutfitRequest", GetUserOutfitResponse, (_USER_ID,)),
+    ("GetBackpackRequest", GetBackpackResponse, (_USER_ID,)),
+    ("ChangeBackpackRequest", ChangeBackpackResponse, (_USER_ID, ("changes", Counter[str]))),
     (
         "GetConversationsRequest",
-        ("not_joined", "last_id", "rid"),
         GetConversationsResponse,
+        (
+            ("not_joined", bool, False),
+            ("last_id", str | None, None),
+        ),
     ),
     (
         "SendMessageRequest",
-        (
-            "conversation_id",
-            "content",
-            "type",
-            "room_id",
-            "world_id",
-            "media_id",
-            "rid",
-        ),
         SendMessageResponse,
+        (
+            ("conversation_id", str),
+            ("content", str),
+            ("type", Literal["text", "invite", "media"]),
+            _ROOM_ID,
+            _WORLD_ID,
+            ("media_id", str | None, None),
+        ),
     ),
     (
         "GetMessagesRequest",
-        ("conversation_id", "last_message_id", "rid"),
         GetMessagesResponse,
+        (
+            ("conversation_id", str),
+            ("last_message_id", str | None, None),
+        ),
     ),
-    (
-        "LeaveConversationRequest",
-        ("conversation_id", "rid"),
-        LeaveConversationResponse,
-    ),
-    (
-        "BuyVoiceTimeRequest",
-        ("payment_method", "rid"),
-        BuyVoiceTimeResponse,
-    ),
+    ("LeaveConversationRequest", LeaveConversationResponse, (("conversation_id", str),)),
+    ("BuyVoiceTimeRequest", BuyVoiceTimeResponse, (("payment_method", _PAYMENT),)),
     (
         "BuyRoomBoostRequest",
-        ("payment_method", "amount", "rid"),
         BuyRoomBoostResponse,
+        (("payment_method", _PAYMENT), ("amount", int, 1)),
     ),
-    (
-        "TipUserRequest",
-        ("user_id", "gold_bar", "rid"),
-        TipUserResponse,
-    ),
-    (
-        "SetOutfitRequest",
-        ("outfit", "rid"),
-        SetOutfitResponse,
-    ),
-    (
-        "GetInventoryRequest",
-        ("rid",),
-        GetInventoryResponse,
-    ),
-    (
-        "BuyItemRequest",
-        ("item_id", "rid"),
-        BuyItemResponse,
-    ),
+    ("TipUserRequest", TipUserResponse, (_USER_ID, ("gold_bar", str))),
+    ("SetOutfitRequest", SetOutfitResponse, (("outfit", list[Item]),)),
+    ("GetInventoryRequest", GetInventoryResponse, ()),
+    ("BuyItemRequest", BuyItemResponse, (("item_id", str),)),
     (
         "SendBulkMessageRequest",
-        ("user_ids", "content", "type", "room_id", "world_id", "rid"),
         SendBulkMessageResponse,
+        (
+            ("user_ids", list[str]),
+            ("content", str),
+            ("type", _TEXT),
+            _ROOM_ID,
+            _WORLD_ID,
+        ),
     ),
-    (
-        "MessageMediaRequest",
-        ("media", "rid"),
-        MessageMediaResponse,
-    ),
+    ("MessageMediaRequest", MessageMediaResponse, (("media", MessageMedia),)),
 )
 
-_DEFAULTS: dict[str, dict[str, Any]] = {
-    "ChannelRequest": {"tags": set},
-    "GetConversationsRequest": {"not_joined": False},
-    "BuyRoomBoostRequest": {"amount": 1},
-}
-
-for _name, _fields, _response_cls in _REQUESTS:
-    _cls = type(
+__all__ = []
+for _name, _response_type, _fields in _REQUESTS:
+    globals()[_name] = make_dataclass(
         _name,
-        (_Request,),
-        {
+        (*_fields, _RID),
+        slots=True,
+        namespace={
             "__module__": __name__,
-            "__qualname__": _name,
-            "__doc__": f"Compatibility shim for official {_name}.",
-            "_fields": _fields,
-            "_defaults": _DEFAULTS.get(_name, {}),
-            "Response": _response_cls,
-            _response_cls.__name__: _response_cls,
+            "Response": _response_type,
+            _response_type.__name__: _response_type,
         },
     )
-
-    globals()[_name] = _cls
     __all__.append(_name)

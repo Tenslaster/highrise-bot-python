@@ -11,7 +11,7 @@ import time
 import types
 from collections import defaultdict
 from collections.abc import Callable, Coroutine
-from typing import Any, Self
+from typing import Any
 
 try:
 
@@ -355,7 +355,7 @@ class CachedWebAPI:
 
 
 
-    async def __aenter__(self) -> Self:
+    async def __aenter__(self) -> CachedWebAPI:
 
         """Enter the context manager."""
 

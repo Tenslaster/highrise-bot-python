@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import field
+from datetime import datetime
 from typing import Any, Literal
+
+from ._pycompat import dataclass
 
 Reaction = Literal["clap", "heart", "thumbs", "wave", "wink"]
 Facing = Literal["FrontRight", "FrontLeft", "BackRight", "BackLeft"]
@@ -71,35 +74,16 @@ class Item:
         return self.id
 
 
+@dataclass(slots=True, weakref_slot=True, repr=False)
 class Message:
-    """Compatible inbox message object."""
+    """Inbox message with aliases for older bots."""
 
-    __slots__ = (
-        "__weakref__",
-        "category",
-        "content",
-        "conversation_id",
-        "createdAt",
-        "message_id",
-        "sender_id",
-    )
-
-    def __init__(
-        self,
-        message_id: str = "",
-        conversation_id: str = "",
-        createdAt: Any = None,  # noqa: N803 - official SDK field name
-        content: str = "",
-        sender_id: str = "",
-        category: str = "text",
-    ) -> None:
-        """Initialize the instance."""
-        self.message_id = message_id
-        self.conversation_id = conversation_id
-        self.createdAt = createdAt
-        self.content = content
-        self.sender_id = sender_id
-        self.category = category
+    message_id: str = ""
+    conversation_id: str = ""
+    createdAt: datetime | None = None
+    content: str = ""
+    sender_id: str = ""
+    category: str = "text"
 
     @property
     def id(self) -> str:
@@ -164,21 +148,13 @@ class SessionMetadata:
     sdk_version: str | None = None
 
 
+@dataclass(slots=True, weakref_slot=True)
 class Error:
     """Server error payload."""
-    __slots__ = ("do_not_reconnect", "message", "rid")
 
-    def __init__(
-        self, message: str = "", do_not_reconnect: bool = False, rid: str | None = None
-    ) -> None:
-        """Initialize the instance."""
-        self.message = message
-        self.do_not_reconnect = do_not_reconnect
-        self.rid = rid
-
-    def __repr__(self) -> str:
-        """Return a developer-friendly representation."""
-        return f"Error(message={self.message!r}, do_not_reconnect={self.do_not_reconnect!r}, rid={self.rid!r})"
+    message: str = ""
+    do_not_reconnect: bool = False
+    rid: str | None = None
 
 
 @dataclass(slots=True, weakref_slot=True)

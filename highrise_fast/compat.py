@@ -1,4 +1,4 @@
-"""Drop-in aliasing for the official ``highrise`` package name.
+"""Legacy in-process aliasing for callers that used the old bootstrap API.
 
 Bots written against the official SDK begin with::
 
@@ -24,9 +24,8 @@ shadowing the official SDK would be a nasty surprise. Pass ``force=True`` to
 override, or uninstall the official package (``pip uninstall highrise-bot-sdk``)
 when migrating for real.
 
-This module deliberately does *not* ship a fake top-level ``highrise`` package
-inside the distribution: a real directory would shadow the official SDK for
-every project sharing the environment, with no opt-out.
+The distribution now ships a native ``highrise`` compatibility package.
+New launchers can import it directly in an environment with this SDK installed.
 """
 
 from __future__ import annotations
@@ -100,6 +99,9 @@ def install_alias(force: bool = False) -> dict[str, str]:
     import highrise_fast
 
     installed: dict[str, str] = {}
+    existing_root = sys.modules.get("highrise")
+    if existing_root is not None and existing_root is not highrise_fast and not force:
+        return dict.fromkeys(ALIASED_MODULES, _SKIPPED)
 
     # The parent must be registered before the submodules so that a later
     # ``import highrise.models`` finds its parent already in sys.modules.

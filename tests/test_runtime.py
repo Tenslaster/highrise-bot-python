@@ -143,7 +143,7 @@ class RoomConnectionTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.Future()
 
         hr = sdk.Highrise(ws=SlowSocket())
-        with self.assertRaises(TimeoutError):
+        with self.assertRaises(asyncio.TimeoutError):
             await asyncio.wait_for(hr._call("GetWalletRequest", timeout=0.02), 0.5)
         self.assertEqual(hr._pending, {})
 
@@ -200,7 +200,7 @@ class RoomConnectionTests(unittest.IsolatedAsyncioTestCase):
         async def handler():
             await asyncio.Future()
 
-        async with asyncio.TaskGroup() as group:
+        async with sdk.TaskGroup() as group:
             with patch.object(sdk, "_DISPATCH_MAX_CONCURRENCY", 0):
                 discarded = handler()
                 self.assertFalse(sdk._spawn_task(group, discarded))
@@ -273,9 +273,9 @@ class WebAPITests(unittest.IsolatedAsyncioTestCase):
             if calls == 1:
                 entered.set()
                 await old.wait()
-                return "stale"
+                return sdk._WebPayload("stale")
             await fresh.wait()
-            return "current"
+            return sdk._WebPayload("current")
 
         with patch.object(api, "_fetch", side_effect=fetch):
             async with api:

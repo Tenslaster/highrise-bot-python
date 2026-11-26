@@ -2,19 +2,48 @@
 
 `highrise_fast` is an unofficial async Python SDK for Highrise bots. It connects
 to the Bot API over WebSocket and reads public data through the Web API. It
-includes typed bot events, reconnect handling, room tracking, and a shared HTTP
-cache. Python 3.11 or newer is required.
+includes the standard `highrise` package and command, typed bot events, room
+tracking, and a shared HTTP cache. Python 3.10 or newer is required.
 
-[Quick start](#quick-start) · [Bot API](#bot-api) · [Web API](#web-api) ·
+[Drop-in upgrade](#drop-in-upgrade) · [Quick start](#quick-start) · [Bot API](#bot-api) · [Web API](#web-api) ·
 [Configuration](#configuration) · [Development](#development)
+
+## Drop-in upgrade
+
+In the virtual environment where your bot runs, replace Pocket Worlds’
+`highrise-bot-sdk` with this distribution. Both provide `highrise`, so use
+one SDK per environment. If you keep a `requirements.txt` or lockfile,
+replace the old SDK dependency with the Git dependency below.
+
+```powershell
+python -m pip uninstall highrise-bot-sdk
+python -m pip install --upgrade "highrise-bot-python[fast] @ git+https://github.com/Tenslaster/highrise-bot-python.git"
+```
+
+Start your existing bot with its usual command.
+
+```console
+highrise mybot:Bot ROOM_ID API_TOKEN
+```
+
+The same entry point is available as `python -m highrise`. Existing imports
+such as `from highrise import BaseBot`, `from highrise.models import Position`,
+and `from highrise.__main__ import bot_runner` work without setup code.
+Bots already using the `highrise_fast` package can keep their imports
+and the `highrise-fast` command.
+
+Compatibility targets the [Pocket Worlds SDK 25.1.0](https://github.com/pocketzworld/python-bot-sdk/tree/de928597846e678ef14213dbe8516bdfb655ec51).
+The two projects publish under different distribution names. This SDK uses
+dataclasses for its models. If your bot uses third-party attrs-specific
+introspection, use the exported `converter` or Python’s dataclass helpers.
 
 ## Quick start
 
-Install from this repository. The `fast` extra adds the optional `orjson` encoder
-and decoder.
+For a new bot, install this SDK in a clean virtual environment. The `fast`
+extra adds the optional `orjson` encoder and decoder.
 
 ```console
-python -m pip install --upgrade "highrise-bot-python[fast] @ git+https://github.com/Tenslaster/highrise-bot-python.git"
+python -m pip install "highrise-bot-python[fast] @ git+https://github.com/Tenslaster/highrise-bot-python.git"
 ```
 
 Create a bot token under **Bots & API Keys** in the Highrise Create dashboard,
@@ -24,7 +53,7 @@ in that room. [Highrise bot setup guide](https://create.highrise.game/learn/bots
 Save this as `my_bot.py` in your working directory.
 
 ```python
-from highrise_fast import BaseBot, SessionMetadata, User
+from highrise import BaseBot, SessionMetadata, User
 
 
 class PingBot(BaseBot):
@@ -43,14 +72,14 @@ room ID, then send `!ping` in the room.
 
 ```powershell
 $env:HR_BOT_TOKEN = 'YOUR_BOT_TOKEN'
-python -m highrise_fast my_bot:PingBot YOUR_ROOM_ID
+highrise my_bot:PingBot YOUR_ROOM_ID
 ```
 
 **Bash**
 
 ```bash
 export HR_BOT_TOKEN='YOUR_BOT_TOKEN'
-python -m highrise_fast my_bot:PingBot YOUR_ROOM_ID
+highrise my_bot:PingBot YOUR_ROOM_ID
 ```
 
 The CLI also accepts a positional token and additional bots via
@@ -74,9 +103,9 @@ Access room actions and queries through `self.highrise` after a session starts.
 
 Queries such as `get_room_users()` return a typed response or a server
 `Error`. Transport timeouts and disconnects can raise exceptions. Commands
-that return `None`, such as `chat()` and `send_emote()`, do not return the
-server acknowledgement to the caller. Methods such as `tip_user()` may spend
-currency. After a time-out, verify the result before retrying those actions.
+such as `chat()` and `send_emote()` return `None` on success and raise
+`ResponseError` if the server rejects the action in the default acknowledged
+mode. Methods such as `tip_user()` may spend currency. After a time-out, verify the result before retrying those actions.
 
 ```python
 from highrise_fast import Error
@@ -95,7 +124,7 @@ else:
 | Hook | When it runs |
 | --- | --- |
 | `before_start(tg)` | Before each connection attempt. Tasks registered with `tg` are scoped to that attempt. |
-| `on_start(metadata)` | When the first room session opens. Metadata includes the bot user ID, room info, and server-provided rate limits. |
+| `on_start(metadata)` | When a room session opens. `highrise.BaseBot` calls it again on reconnect, as in the original SDK. `highrise_fast.BaseBot` calls it on the first session. |
 | `on_reconnected()` | On later sessions. The default refreshes the roster. Call `await super().on_reconnected()` when overriding the hook to keep that behavior. |
 | `on_chat(user, message)`, `on_whisper(user, message)` | Room chat and private room whispers. |
 | `on_user_join(user, position)`, `on_user_leave(user)`, `on_user_move(user, destination)` | Changes to room presence and position. |
@@ -112,6 +141,9 @@ that should survive reconnects and stop when the bot shuts down. Use
 `self.highrise.call_in(callback, delay)` for delayed work scoped to the
 current connection.
 
+Session metadata includes the connection ID and bot user ID, room info, and
+server-provided rate limits. Named limits use `(limit, period)` pairs.
+
 `self.room_tracker` subscribes to join, leave, and move events and is seeded
 from a room snapshot. Until the snapshot arrives, `self.highrise.state_dirty`
 is true. A successful later `get_room_users()` refreshes the tracker as the
@@ -126,11 +158,14 @@ await user replies, and `CommandRegistry` for decorated commands.
 The Web API client works independently of a room connection and uses a
 persistent HTTP session. Use it as an async context manager in standalone
 scripts. Inside a bot, use `self.webapi`, which the runner closes on shutdown.
+`highrise.webapi.WebAPI` returns the named models in `highrise.models_webapi`.
+`highrise_fast.WebAPI` provides attribute access and raw data for flexible
+queries.
 
 ```python
 import asyncio
 
-from highrise_fast import WebAPI
+from highrise.webapi import WebAPI
 
 
 async def main() -> None:
@@ -170,7 +205,7 @@ caller.
 ## Configuration
 
 ```console
-python -m highrise_fast my_bot:PingBot YOUR_ROOM_ID --validation strict --on-invalid drop
+highrise my_bot:PingBot YOUR_ROOM_ID --validation strict --on-invalid drop
 python -m highrise_fast doctor
 ```
 
@@ -196,13 +231,23 @@ reason codes. Use `invalid_packet_stats()` for validation counters and
 `stats()` for transport, dispatch, and latency metrics. The main receive loop
 uses structural checks by default.
 
-### Migrating an existing bot
+### Sending a typed request
 
-Change imports from `highrise` to `highrise_fast` and run the bot with the
-CLI above. For code that expects the `highrise` namespace, call
-`highrise_fast.install_alias()` before importing that code. The alias provides
-common models and request shims. Test your bot's imports and workflows during
-migration. [Runnable alias example](examples/alias_migration.py)
+The low-level interface uses the same connection, timeout, and request
+correlation code as `self.highrise`'s convenience methods.
+
+```python
+from highrise import do_req_resp
+from highrise.models import GetWalletRequest
+
+# Inside a bot handler
+wallet = await do_req_resp(self.highrise, GetWalletRequest())
+if isinstance(wallet, GetWalletRequest.GetWalletResponse):
+    print(wallet.content)
+```
+
+Use `highrise.converter` with `Outgoing` or `Incoming` to encode or decode
+protocol objects in an offline tool.
 
 ## Development
 
@@ -215,9 +260,10 @@ python -m highrise_fast self-test
 python -m highrise_fast bench
 ```
 
-The regression suite runs local HTTP and WebSocket servers. It covers CLI
-startup, reconnect RPCs, room snapshots, request deadlines, cache
-invalidation, and item-search coalescing. `self-test` exercises protocol
+The regression suite runs local HTTP and WebSocket servers. It covers an
+unchanged `highrise` bot launched in a fresh interpreter, reconnect RPCs,
+typed Web API responses, request deadlines, cache invalidation, and
+item-search coalescing. `self-test` exercises protocol
 fixtures offline. `bench` reports local structural-validation timing.
 Highrise service latency, rate limits, and bot handler work also affect
 production performance.
