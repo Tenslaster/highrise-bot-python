@@ -1021,6 +1021,11 @@ class CommandRegistry:
 
 
 
+    @property
+    def has_commands(self) -> bool:
+        """Return whether the registry has any registered commands."""
+        return bool(self._commands)
+
     def set_permission_checker(self, checker: Callable):
 
         """Optional: async def checker(bot, user, rank) -> bool"""
@@ -1424,6 +1429,16 @@ class RoomTracker:
         self._anchors: dict[str, tuple[str, int]] = {}
 
 
+
+    def replace_roster(self, rows) -> None:
+        """Replace the local roster with a complete room snapshot."""
+        snapshot = RoomTracker(self.cell_size)
+        for user, position in rows:
+            snapshot.add(user, position)
+        self._grid = snapshot._grid
+        self._positions = snapshot._positions
+        self._users = snapshot._users
+        self._anchors = snapshot._anchors
 
     def _cell(self, x: float, z: float) -> tuple[int, int]:
 

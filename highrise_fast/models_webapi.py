@@ -34,6 +34,8 @@ __all__ = [
 
     "Rarity",
 
+    "SearchItemsResponse",
+
     "parse_webapi_response",
 
 ]
@@ -681,48 +683,32 @@ class GetPublicItemResponse(_Base):
 
 
 
-class GetPublicItemsResponse(_Base):
-
-    """Paginated response payload for public items."""
+class SearchItemsResponse(_Base):
+    """Public item search results with the total number of matches."""
 
     @property
-
-    def items(self) -> Any:
-
-        """Return Items."""
-
+    def items(self) -> list[AttrDict]:
+        """Return the items on this page."""
         return self._get("items", [])
 
-
-
     @property
-
     def total(self) -> int:
-
-        """Return Total."""
-
+        """Return the total number of matches."""
         return _as_int(self._raw.get("total"), 0)
 
 
+class GetPublicItemsResponse(SearchItemsResponse):
+    """Paginated response payload for public items."""
 
     @property
-
     def first_id(self) -> str:
-
-        """Return First id."""
-
+        """Return the first item ID on this page."""
         return _as_str(self._raw.get("first_id"))
 
-
-
     @property
-
     def last_id(self) -> str:
-
-        """Return Last id."""
-
+        """Return the last item ID on this page."""
         return _as_str(self._raw.get("last_id"))
-
 
 
 class GetPublicGrabResponse(_Base):
@@ -785,90 +771,27 @@ class GetPublicGrabsResponse(_Base):
 
 
 
-def _segments(endpoint: str) -> list[str]:
-
-    """Extract path segments from an endpoint URL."""
-
-    path = endpoint.split("?", 1)[0]
-
-    return [part for part in path.strip("/").split("/") if part]
-
+_RESPONSE_TYPES = {
+    "users": (GetPublicUsersResponse, GetPublicUserResponse),
+    "rooms": (GetPublicRoomsResponse, GetPublicRoomResponse),
+    "posts": (GetPublicPostsResponse, GetPublicPostResponse),
+    "items": (GetPublicItemsResponse, GetPublicItemResponse),
+    "grabs": (GetPublicGrabsResponse, GetPublicGrabResponse),
+}
 
 
 def parse_webapi_response(endpoint: str, data: Any) -> Any:
-
     """Route a public WebAPI JSON payload to the matching response class."""
-
     if not isinstance(data, dict):
-
         return data
 
-    parts = _segments(endpoint)
+    path = endpoint.partition("?")[0].strip("/")
+    if path == "items/search":
+        return SearchItemsResponse(data)
 
-    if not parts:
-
-        return data
-
-    root = parts[0]
-
-    if root == "users":
-
-        return (
-
-            GetPublicUserResponse(data)
-
-            if len(parts) > 1
-
-            else GetPublicUsersResponse(data)
-
-        )
-
-    if root == "rooms":
-
-        return (
-
-            GetPublicRoomResponse(data)
-
-            if len(parts) > 1
-
-            else GetPublicRoomsResponse(data)
-
-        )
-
-    if root == "posts":
-
-        return (
-
-            GetPublicPostResponse(data)
-
-            if len(parts) > 1
-
-            else GetPublicPostsResponse(data)
-
-        )
-
-    if root == "items":
-
-        return (
-
-            GetPublicItemResponse(data)
-
-            if len(parts) > 1
-
-            else GetPublicItemsResponse(data)
-
-        )
-
-    if root == "grabs":
-
-        return (
-
-            GetPublicGrabResponse(data)
-
-            if len(parts) > 1
-
-            else GetPublicGrabsResponse(data)
-
-        )
+    root, _, item_id = path.partition("/")
+    models = _RESPONSE_TYPES.get(root)
+    if models is not None and "/" not in item_id:
+        return models[bool(item_id)](data)
 
     return data

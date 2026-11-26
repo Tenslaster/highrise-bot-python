@@ -14,7 +14,7 @@ from highrise_fast import WebAPI
 
 async def main(username: str) -> int:
     # cache_ttl keeps repeated lookups off the network.
-    async with _Closing(WebAPI(cache_ttl=60)) as api:
+    async with WebAPI(cache_ttl=60) as api:
         user_id = await api.username_to_id(username)
         if user_id is None:
             print(f"no user named {username!r}")
@@ -29,19 +29,6 @@ async def main(username: str) -> int:
         again = await api.get_user(user_id)
         print(f"  cached repeat ok: {again.user.username == user.user.username}")
     return 0
-
-
-class _Closing:
-    """Closes the WebAPI session even when the body raises."""
-
-    def __init__(self, api: WebAPI) -> None:
-        self.api = api
-
-    async def __aenter__(self) -> WebAPI:
-        return self.api
-
-    async def __aexit__(self, *exc_info: object) -> None:
-        await self.api.close()
 
 
 if __name__ == "__main__":

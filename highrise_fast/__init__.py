@@ -60,6 +60,7 @@ import gc
 import importlib
 import json
 import logging
+import math
 import os
 import random
 import socket
@@ -73,7 +74,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
-from inspect import isawaitable
+from inspect import isawaitable, iscoroutine
 from itertools import count
 from typing import Any, Literal
 
@@ -229,7 +230,21 @@ from .models import (
     VoiceEvent,
     _DoNotReconnect,
 )
-from .models_webapi import parse_webapi_response
+from .models_webapi import (
+    AttrDict,
+    GetPublicGrabResponse,
+    GetPublicGrabsResponse,
+    GetPublicItemResponse,
+    GetPublicItemsResponse,
+    GetPublicPostResponse,
+    GetPublicPostsResponse,
+    GetPublicRoomResponse,
+    GetPublicRoomsResponse,
+    GetPublicUserResponse,
+    GetPublicUsersResponse,
+    SearchItemsResponse,
+    parse_webapi_response,
+)
 
 try:
     from .extras import MISSING as _EXTRAS_MISSING
@@ -242,7 +257,7 @@ except ImportError:  # pragma: no cover - compatibility with older extras
     from .extras import WebAPI as CachedWebAPI  # noqa: F401
 
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 
 __all__ = [
@@ -301,6 +316,7 @@ __all__ = [
     "RoomInfo",
     "RoomModeratedEvent",
     "RoomPermissions",
+    "SearchItemsResponse",
     "SendBulkMessageResponse",
     "SendMessageResponse",
     "SessionMetadata",
@@ -362,7 +378,8 @@ def _env_float(name: str, default: float) -> float:
     if raw is None or raw.strip() == "":
         return default
     try:
-        return float(raw)
+        value = float(raw)
+        return value if math.isfinite(value) else default
     except (TypeError, ValueError):
         return default
 
@@ -718,9 +735,9 @@ def _maybe_tune_gc() -> None:
         return
     try:
         gc.collect()
-        frozen = gc.freeze()
+        gc.freeze()
         _GC_FROZEN = True
-        log.info("GC tuned: froze %d objects (warmup %.1fs)", frozen, now - _GC_FIRST_TUNE_TIME)
+        log.info("GC tuned: froze %d objects (warmup %.1fs)", gc.get_freeze_count(), now - _GC_FIRST_TUNE_TIME)
         old = gc.get_threshold()
         gc.set_threshold(1000, 15, 15)
         log.info("GC thresholds tuned: %s -> %s", old, gc.get_threshold())
@@ -995,23 +1012,28 @@ def loads_json(raw: Any) -> Any:
     return json.loads(raw)
 
 
-async def _ws_send_text(ws: Any, data: bytes) -> None:
-    """Send bytes over WebSocket using TEXT frames when possible."""
+async def _ws_send_text(ws: Any, data: str | bytes) -> int:
+    """Send encoded JSON and return its UTF-8 size in bytes."""
     if _WS_BINARY_FRAMES:
         send_bytes = getattr(ws, "send_bytes", None)
         if callable(send_bytes):
-            await send_bytes(data)
-            return
+            encoded = data.encode("utf-8") if isinstance(data, str) else data
+            await send_bytes(encoded)
+            return len(encoded)
 
     send_str = getattr(ws, "send_str", None)
     if callable(send_str):
+        if isinstance(data, str):
+            await send_str(data)
+            return len(data) if data.isascii() else len(data.encode("utf-8"))
         await send_str(data.decode("utf-8"))
-        return
+        return len(data)
 
     send_bytes = getattr(ws, "send_bytes", None)
     if callable(send_bytes):
-        await send_bytes(data)
-        return
+        encoded = data.encode("utf-8") if isinstance(data, str) else data
+        await send_bytes(encoded)
+        return len(encoded)
 
     raise TypeError("WebSocket object supports neither send_str nor send_bytes")
 
@@ -1019,23 +1041,19 @@ async def _ws_send_text(ws: Any, data: bytes) -> None:
 async def _send_ws_payload(ws: Any, payload: dict[str, Any]) -> None:
     """Encode and send a WebSocket JSON payload."""
 
-    fast = False
+    fast = orjson is not None
 
     try:
         if orjson is not None:
             data = orjson.dumps(payload, default=_json_default)
-
-            fast = True
-
         else:
-            data = json.dumps(
+            text = json.dumps(
                 payload,
                 default=_json_default,
                 separators=(",", ":"),
                 ensure_ascii=False,
-            ).encode("utf-8")
-
-            fast = False
+            )
+            data = text if text.isascii() else text.encode("utf-8")
 
     except (TypeError, ValueError) as exc:
         _STATS["encode_errors"] += 1
@@ -1045,7 +1063,7 @@ async def _send_ws_payload(ws: Any, payload: dict[str, Any]) -> None:
         raise TypeError("JSON encoding failed") from exc
 
     try:
-        await _ws_send_text(ws, data)
+        bytes_sent = await _ws_send_text(ws, data)
 
     except Exception as exc:
         if _is_ws_io_error(exc):
@@ -1063,7 +1081,7 @@ async def _send_ws_payload(ws: Any, payload: dict[str, Any]) -> None:
     else:
         _STATS["slow"] += 1
 
-    _STATS["bytes_sent"] += len(data)
+    _STATS["bytes_sent"] += bytes_sent
 
 
 def _as_int(value: Any, default: int = 0) -> int:
@@ -1352,6 +1370,10 @@ def _register_typed(msg_type: str):
     return deco
 
 
+_TYPED_PARSERS["SessionMetadata"] = parse_session_metadata
+_ERROR_TYPES = ("Error", "ErrorResponse")
+
+
 @_register_typed("ChatEvent")
 def _parse_chat_event(d: dict[str, Any]) -> Any:
     """Parse Chat event."""
@@ -1529,13 +1551,14 @@ def _parse_moderated(d: dict[str, Any]) -> Any:
     )
 
 
+@_register_typed("ErrorResponse")
 @_register_typed("Error")
 def _parse_error(d: dict[str, Any]) -> Any:
     """Parse Error."""
 
     return Error(
-        message=d.get("message") or "",
-        do_not_reconnect=d.get("do_not_reconnect") or False,
+        message=str(d.get("message") or ""),
+        do_not_reconnect=d.get("do_not_reconnect") is True,
         rid=d.get("rid"),
     )
 
@@ -1923,7 +1946,7 @@ def parse_server_message(
         try:
             data = loads_json(data)
         except (ValueError, TypeError, UnicodeDecodeError):
-            if strict:
+            if strict or strict_semantic:
                 raise HighriseFastValidationError(
                     [
                         ValidationErrorDetail(
@@ -1938,11 +1961,10 @@ def parse_server_message(
                 ) from None
             return data
 
-    if strict:
-        strict_semantic = True
+    if strict or strict_semantic:
         _hrf_validate_server_message(
             data,
-            strict_semantic=strict_semantic,
+            strict_semantic=True,
         )
 
     if isinstance(data, dict):
@@ -2550,28 +2572,9 @@ class BaseBot:
         pass
 
     async def on_reconnected(self) -> None:
-        """Called after a successful reconnect (not on first connect).
-
-        Override to implement custom resync logic. The default implementation
-        checks ``highrise.state_dirty`` and, if set, calls ``GetRoomUsers`` to
-        re-sync room state, then clears the dirty flag via ``mark_state_synced()``.
-        """
-        try:
-            hr = getattr(self, "highrise", None)
-            if hr is None:
-                return
-            if getattr(hr, "state_dirty", False):
-                log.info("state_dirty set on reconnect — resyncing room users")
-                try:
-                    await hr.get_room_users()
-                except Exception:
-                    log.debug("Resync GetRoomUsers failed", exc_info=True)
-                try:
-                    hr.mark_state_synced()
-                except Exception:
-                    pass
-        except Exception:
-            log.debug("on_reconnected default resync failed", exc_info=True)
+        """Refresh the room roster after reconnecting."""
+        if self.highrise.state_dirty:
+            await self.highrise._refresh_room()
 
 
 class Highrise:
@@ -2581,6 +2584,8 @@ class Highrise:
         ws: Any = None,
         tg: TaskGroup | None = None,
         my_id: str = "",
+        *,
+        room_tracker: RoomTracker | None = None,
     ) -> None:
         """Initialize the instance."""
 
@@ -2589,6 +2594,7 @@ class Highrise:
         self.tg = tg
 
         self.my_id = my_id
+        self._room_tracker = room_tracker
 
         self._req_id = count()
 
@@ -2636,19 +2642,35 @@ class Highrise:
 
         return False
 
-    def _resolve_pending(self, rid: str, data: dict[str, Any]) -> bool:
+    async def _refresh_room(self) -> None:
+        """Fetch a fresh roster and surface failures to the lifecycle handler."""
+        response = await self.get_room_users()
+        if isinstance(response, Error):
+            log.warning("Could not refresh room roster: %s", response.message)
+
+    def _resolve_pending(
+        self, rid: str, data: dict[str, Any], *, update_roster: bool = True
+    ) -> bool:
         """Resolve the pending call for a request ID."""
 
         future = self._pending.pop(rid, None)
 
         if future is not None and not future.done():
             try:
-                obj = parse_server_message(data)
-
+                obj = _parse_typed_message(data)
             except Exception:
                 log.exception("Failed to parse response for rid=%s", rid)
 
                 obj = data
+
+            if update_roster and isinstance(obj, GetRoomUsersResponse):
+                try:
+                    if self._room_tracker is not None:
+                        self._room_tracker.replace_roster(obj.content)
+                    self.mark_state_synced()
+                except Exception:
+                    self.state_dirty = True
+                    log.exception("Failed to update room tracker from roster response")
 
             future.set_result(obj)
 
@@ -2658,12 +2680,9 @@ class Highrise:
             # Ack of a fire-and-forget send: expected, handled on the fast path.
             del self._ff_rids[rid]
 
-            if data.get("_type") == "Error":
-                # Keep failures visible: count them and let the caller log the
-                # packet as before instead of hiding them as a fast hit.
+            if data.get("_type") in _ERROR_TYPES:
                 _STATS["api_errors"] += 1
-
-                return False
+                log.debug("Unacknowledged action failed (rid=%s): %s", rid, data.get("message"))
 
             return True
 
@@ -2694,7 +2713,11 @@ class Highrise:
             # Acks that never arrived (e.g. connection dropped): forget the oldest.
             del ff[next(iter(ff))]
 
-        await _send_ws_payload(self.ws, payload)
+        try:
+            await _send_ws_payload(self.ws, payload)
+        except BaseException:
+            ff.pop(rid, None)
+            raise
 
     _RPC_HARD_TIMEOUT: float = 30.0
 
@@ -2711,24 +2734,18 @@ class Highrise:
         payload: dict[str, Any] = {"_type": type_name, "rid": rid}
         if fields:
             payload.update(fields)
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[Any] = loop.create_future()
+        future = asyncio.get_running_loop().create_future()
         self._pending[rid] = future
         t0 = time.perf_counter()
+        effective_timeout = (
+            timeout if timeout is not None and timeout > 0
+            else _REQ_TIMEOUT if _REQ_TIMEOUT > 0
+            else self._RPC_HARD_TIMEOUT
+        )
         try:
-            await _send_ws_payload(self.ws, payload)
-
-            if timeout is not None and timeout > 0:
-                effective_timeout = timeout
-            elif _REQ_TIMEOUT > 0:
-                effective_timeout = _REQ_TIMEOUT
-            else:
-                effective_timeout = self._RPC_HARD_TIMEOUT
-
-            response = await asyncio.wait_for(
-                future,
-                timeout=effective_timeout,
-            )
+            async with asyncio.timeout(effective_timeout):
+                await _send_ws_payload(self.ws, payload)
+                response = await future
 
             _STATS["pops"] += 1
             _record_latency(t0)
@@ -2738,8 +2755,14 @@ class Highrise:
                     raise ResponseError(response.message)
                 return response
             return response
-        except TimeoutError:
-            _STATS["timeouts"] += 1
+        except BaseException as exc:
+            if isinstance(exc, TimeoutError):
+                _STATS["timeouts"] += 1
+            if not future.done():
+                future.cancel()
+            elif not future.cancelled():
+                # Disconnect can reject the future while the socket send is still pending.
+                future.exception()
             raise
         finally:
             self._pending.pop(rid, None)
@@ -3213,6 +3236,8 @@ class WebAPI:
 
         self._session: Any = None
         self._cache = TTLCache()
+        self._inflight: dict[str, asyncio.Task[Any]] = {}
+        self._requests: set[asyncio.Task[Any]] = set()
 
         if cache_ttl is None:
             cache_ttl = _WEBAPI_CACHE_TTL
@@ -3239,41 +3264,75 @@ class WebAPI:
     async def _get(self, endpoint: str, cache_ttl: int | None = None) -> Any:
         """Send a GET request to the public WebAPI."""
         ttl = self.cache_ttl if cache_ttl is None else max(0, int(cache_ttl))
+        if ttl == 0:
+            return await self._fetch(endpoint)
 
-        if ttl > 0:
-            hit = self._cache.get(endpoint)
+        hit = self._cache.get(endpoint)
+        if hit is not _EXTRAS_MISSING:
+            return hit
 
-            if hit is not _EXTRAS_MISSING and hit is not None:
-                return hit
+        task = self._inflight.get(endpoint)
+        if task is None:
+            task = asyncio.create_task(self._fetch_cached(endpoint, ttl))
+            self._inflight[endpoint] = task
+            self._requests.add(task)
+            task.add_done_callback(self._request_done)
+        return await asyncio.shield(task)
 
+    async def _fetch(self, endpoint: str) -> Any:
         session = await self._get_session()
 
         async with session.get(f"{self.url}{endpoint}") as response:
             payload = await response.read()
-
             if response.status == 200:
-                data = loads_json(payload)
-                result = parse_webapi_response(endpoint, data)
-
-                if ttl > 0:
-                    self._cache.set(endpoint, result, ttl)
-
-                return result
-
+                return parse_webapi_response(endpoint, loads_json(payload))
             raise ResponseError(payload.decode("utf-8", errors="replace"))
+
+    async def _fetch_cached(self, endpoint: str, ttl: int) -> Any:
+        task = asyncio.current_task()
+        try:
+            result = await self._fetch(endpoint)
+            if self._inflight.get(endpoint) is task:
+                self._cache.set(endpoint, result, ttl)
+            return result
+        finally:
+            if self._inflight.get(endpoint) is task:
+                self._inflight.pop(endpoint, None)
+
+    def _request_done(self, task: asyncio.Task[Any]) -> None:
+        self._requests.discard(task)
+        if not task.cancelled():
+            # Every waiting caller can be cancelled before the shared request finishes.
+            task.exception()
 
     def invalidate_cache(self, endpoint: str | None = None) -> None:
         """Invalidate cached WebAPI responses."""
         if endpoint is None:
             self._cache.clear()
+            self._inflight.clear()
         else:
             self._cache.invalidate(endpoint)
+            self._inflight.pop(endpoint, None)
 
     async def close(self) -> None:
         """Close the underlying HTTP session."""
-        if self._session is not None and not self._session.closed:
-            await self._session.close()
-            self._session = None
+        session, self._session = self._session, None
+        self.invalidate_cache()
+        pending = tuple(self._requests)
+        for task in pending:
+            task.cancel()
+        try:
+            if session is not None and not session.closed:
+                await session.close()
+        finally:
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+    async def __aenter__(self) -> WebAPI:
+        return self
+
+    async def __aexit__(self, *exc_info: Any) -> None:
+        await self.close()
 
     @staticmethod
     def _query(params: dict[str, Any]) -> str:
@@ -3296,9 +3355,9 @@ class WebAPI:
 
         return "?" + urllib.parse.urlencode(clean, doseq=True)
 
-    async def get_user(self, user_id: str) -> Any:
+    async def get_user(self, user_id: str) -> GetPublicUserResponse:
         """Get a public user by ID."""
-        return await self._get(f"/users/{user_id}")
+        return await self._get("/users/" + urllib.parse.quote(user_id, safe=""))
 
     async def get_users(
         self,
@@ -3307,7 +3366,7 @@ class WebAPI:
         sort_order: str = "desc",
         limit: int = 20,
         username: str | None = None,
-    ) -> Any:
+    ) -> GetPublicUsersResponse:
         """Get a paginated list of public users."""
         return await self._get(
             "/users"
@@ -3324,7 +3383,7 @@ class WebAPI:
 
     async def get_user_by_username(
         self, username: str, *, exact: bool = True
-    ) -> Any:
+    ) -> AttrDict | None:
         """Fetch a public user by username.
 
         Uses the ``username`` query parameter of ``GET /users``.
@@ -3376,9 +3435,9 @@ class WebAPI:
         username = getattr(user, "username", None)
         return str(username) if username else None
 
-    async def get_room(self, room_id: str) -> Any:
+    async def get_room(self, room_id: str) -> GetPublicRoomResponse:
         """Get a public room by ID."""
-        return await self._get(f"/rooms/{room_id}")
+        return await self._get("/rooms/" + urllib.parse.quote(room_id, safe=""))
 
     async def get_rooms(
         self,
@@ -3388,7 +3447,7 @@ class WebAPI:
         limit: int = 20,
         room_name: str | None = None,
         owner_id: str | None = None,
-    ) -> Any:
+    ) -> GetPublicRoomsResponse:
         """Get a paginated list of public rooms."""
         return await self._get(
             "/rooms"
@@ -3404,9 +3463,9 @@ class WebAPI:
             )
         )
 
-    async def get_post(self, post_id: str) -> Any:
+    async def get_post(self, post_id: str) -> GetPublicPostResponse:
         """Get a public post by ID."""
-        return await self._get(f"/posts/{post_id}")
+        return await self._get("/posts/" + urllib.parse.quote(post_id, safe=""))
 
     async def get_posts(
         self,
@@ -3415,7 +3474,7 @@ class WebAPI:
         sort_order: str = "desc",
         limit: int = 20,
         author_id: str | None = None,
-    ) -> Any:
+    ) -> GetPublicPostsResponse:
         """Get a paginated list of public posts."""
         return await self._get(
             "/posts"
@@ -3430,9 +3489,9 @@ class WebAPI:
             )
         )
 
-    async def get_item(self, item_id: str) -> Any:
+    async def get_item(self, item_id: str) -> GetPublicItemResponse:
         """Get a public item by ID."""
-        return await self._get(f"/items/{item_id}")
+        return await self._get("/items/" + urllib.parse.quote(item_id, safe=""))
 
     async def get_items(
         self,
@@ -3443,7 +3502,7 @@ class WebAPI:
         rarity: str | None = None,
         item_name: str | None = None,
         category: Any | None = None,
-    ) -> Any:
+    ) -> GetPublicItemsResponse:
         """Get a paginated list of public items."""
         category_value = getattr(category, "value", category)
 
@@ -3462,9 +3521,17 @@ class WebAPI:
             )
         )
 
-    async def get_grab(self, grab_id: str) -> Any:
+    async def search_items(
+        self, query: str, *, limit: int = 20, skip: int = 0
+    ) -> SearchItemsResponse:
+        """Search the public item catalog by query with offset pagination."""
+        return await self._get(
+            "/items/search" + self._query({"query": query, "limit": limit, "skip": skip})
+        )
+
+    async def get_grab(self, grab_id: str) -> GetPublicGrabResponse:
         """Get a public grab by ID."""
-        return await self._get(f"/grabs/{grab_id}")
+        return await self._get("/grabs/" + urllib.parse.quote(grab_id, safe=""))
 
     async def get_grabs(
         self,
@@ -3473,7 +3540,7 @@ class WebAPI:
         sort_order: str = "desc",
         limit: int = 20,
         title: str | None = None,
-    ) -> Any:
+    ) -> GetPublicGrabsResponse:
         """Get a paginated list of public grabs."""
         return await self._get(
             "/grabs"
@@ -3521,9 +3588,14 @@ _EVENT_TO_SUBSCRIPTION: dict[str, str] = {
 
 
 def active_subscriptions(bot: BaseBot) -> frozenset[str]:
-    """Subscription names for the on_* handlers the bot's class overrides."""
+    """Subscription names required by the bot's hooks and room tracker."""
 
     subs: set[str] = set()
+    if getattr(bot, "room_tracker", None) is not None:
+        subs.update({"user_joined", "user_left", "user_moved"})
+    registry = getattr(bot, "command_registry", None) or commands
+    if getattr(registry, "has_commands", True):
+        subs.update({"chat", "message"})
 
     for method_name, event_name in _HANDLER_METHODS.items():
         base_handler = getattr(BaseBot, method_name, None)
@@ -3611,28 +3683,31 @@ def _spawn_task(
     """
     global _DISPATCH_DROPPED
     if _dispatch_backpressure_check():
+        if iscoroutine(result):
+            result.close()
         _DISPATCH_DROPPED += 1
         _STATS["dispatch_dropped"] += 1
         log.debug("Dispatcher backpressure: dropping %s (active=%d >= max=%d)", event_type, _DISPATCH_ACTIVE, _DISPATCH_MAX_CONCURRENCY)
         return False
     _dispatch_inc()
+    handler = (
+        _safe_handler_with_metrics(result, event_type, bot)
+        if bot is not None and event_type is not None
+        else _safe_handler(result)
+    )
+
+    def handler_done(task: asyncio.Task) -> None:
+        _dispatch_dec()
+        if task.cancelled() and iscoroutine(result):
+            result.close()
+
     try:
-        if bot is not None and event_type is not None:
-            async def _wrapper():
-                try:
-                    await _safe_handler_with_metrics(result, event_type, bot)
-                finally:
-                    _dispatch_dec()
-            tg.create_task(_wrapper())
-        else:
-            async def _wrapper2():
-                try:
-                    await _safe_handler(result)
-                finally:
-                    _dispatch_dec()
-            tg.create_task(_wrapper2())
+        tg.create_task(handler).add_done_callback(handler_done)
         return True
     except Exception:
+        handler.close()
+        if iscoroutine(result):
+            result.close()
         _dispatch_dec()
         # A closed/dead TaskGroup (e.g. right after a reconnect) used to fail
         # here with only a DEBUG line, so the event vanished while the receive
@@ -3703,7 +3778,7 @@ async def _run_internal_tests_async():
 
     truncated = b'{"_type": "ChatEvent", "user": {"id": "123", "username": "test"'
 
-    data = loads_json(truncated)
+    data = parse_server_message(truncated)
 
     assert data is None or not isinstance(
         data, dict
@@ -4026,7 +4101,7 @@ def _dispatch_event(
         conversation_id = str(data.get("conversation_id", ""))
         is_new = bool(data.get("is_new_conversation", False))
         _cmd_registry = getattr(bot, "command_registry", None) or commands
-        if _cmd_registry and getattr(bot, "highrise", None):
+        if getattr(_cmd_registry, "has_commands", True) and getattr(bot, "highrise", None):
 
             async def _handle_dm_command(
                 _bot=bot, _uid=user_id, _cid=conversation_id, _reg=_cmd_registry
@@ -4058,7 +4133,7 @@ def _dispatch_event(
                         "DM command routing failed: %r", e
                     )
 
-            tg.create_task(_safe_handler(_handle_dm_command()))
+            _spawn_task(tg, _handle_dm_command(), bot, "DMCommand")
         _spawn_task(
             tg,
             bot.on_message(user_id, conversation_id, is_new),
@@ -4103,12 +4178,11 @@ async def _receive_metadata(ws: Any) -> SessionMetadata | Error:
 
         raise ConnectionResetError("Invalid session metadata payload")
 
-    if data.get("_type") == "Error":
-        return Error(
-            message=str(data.get("message", "")),
-            do_not_reconnect=bool(data.get("do_not_reconnect", False)),
-            rid=data.get("rid"),
-        )
+    if data.get("_type") in _ERROR_TYPES:
+        return _parse_error(data)
+
+    if not data.get("user_id") or not isinstance(data.get("room_info"), dict):
+        raise ConnectionResetError("Missing user ID or room info in session metadata")
 
     return parse_session_metadata(data)
 
@@ -4132,12 +4206,8 @@ async def _receive_control_metadata(ws: Any) -> ControlSessionMetadata | Error:
 
         raise ConnectionResetError("Invalid control metadata payload")
 
-    if data.get("_type") == "Error":
-        return Error(
-            message=str(data.get("message", "")),
-            do_not_reconnect=bool(data.get("do_not_reconnect", False)),
-            rid=data.get("rid"),
-        )
+    if data.get("_type") in _ERROR_TYPES:
+        return _parse_error(data)
 
     return parse_control_session_metadata(data)
 
@@ -4239,6 +4309,7 @@ async def _receive_loop(
         rid = data.get("rid")
 
         event_type = data.get("_type")
+        valid = True
 
         if strict:
             vtype = event_type if isinstance(event_type, str) else None
@@ -4251,13 +4322,14 @@ async def _receive_loop(
                     _hrf_validate_server_message(data)
 
                 except HighriseFastValidationError as exc:
+                    valid = False
                     if _handle_invalid_packet(
                         exc, data, highrise, bot, tg, on_invalid, warn_cooldown
                     ):
                         continue
 
         if isinstance(rid, str):
-            if highrise._resolve_pending(rid, data):
+            if highrise._resolve_pending(rid, data, update_roster=valid):
                 _STATS["incoming_fast"] += 1
 
             else:
@@ -4272,12 +4344,8 @@ async def _receive_loop(
 
             continue
 
-        if event_type == "Error":
-            error = Error(
-                message=str(data.get("message", "")),
-                do_not_reconnect=bool(data.get("do_not_reconnect", False)),
-                rid=data.get("rid"),
-            )
+        if event_type in _ERROR_TYPES:
+            error = _parse_error(data)
 
             print(
                 f"ERROR: {error.message} closing connection with ID: "
@@ -4338,6 +4406,19 @@ async def _sleep_backoff(attempt: int) -> None:
     log.debug("Backoff sleep %.2fs (attempt %d)", delay, attempt)
     await asyncio.sleep(delay)
 
+
+
+def _discard_buffered_chat(tg: TaskGroup) -> None:
+    """Discard events buffered for a connection that just ended."""
+    if not _CHAT_FLOOD_QUEUE:
+        return
+    buffered = [entry for entry in _CHAT_FLOOD_QUEUE if entry[4] is not tg]
+    dropped = len(_CHAT_FLOOD_QUEUE) - len(buffered)
+    if dropped:
+        _CHAT_FLOOD_QUEUE.clear()
+        _CHAT_FLOOD_QUEUE.extend(buffered)
+        _STATS["chat_flood_dropped"] += dropped
+        _STATS["dispatch_queued"] = len(buffered)
 
 
 async def _drain_chat_flood_queue():
@@ -4510,7 +4591,7 @@ async def _close_bot_extras(bot: BaseBot) -> None:
 
 
 async def bot_runner(bot: BaseBot, room_id: str, api_key: str) -> None:
-    """Run a single bot with reconnect logic, backoff+jitter, loop-lag/GC monitoring, and resync hook."""
+    """Run a room bot until cancelled or the server refuses reconnection."""
     setup_logging()
     _ensure_aiohttp()
     _ensure_gc_monitoring()
@@ -4518,133 +4599,96 @@ async def bot_runner(bot: BaseBot, room_id: str, api_key: str) -> None:
         bot.metrics = Metrics()
     if getattr(bot, "tasks", None) is None:
         bot.tasks = TaskManager()
-    # Both monitors are refcounted and stopped in the `finally` block at the
-    # end of this function; the returned handles are intentionally unused.
     start_loop_lag_monitor(0.1)
     start_chat_drain_task()
     _trim_deques_if_needed()
     reconnect_attempt = 0
-    is_first_connect = True
+    first_session = True
+    throttling = throttler(5, 5)
     try:
-        async with TaskGroup() as tg:
-            t = throttler(5, 5)
+        timeout = ClientTimeout(total=30, sock_connect=10, sock_read=60)
+        async with ClientSession(timeout=timeout) as session:
             while True:
-                await anext(t)
+                await anext(throttling)
                 try:
-                    await bot.before_start(tg)
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    log.exception("before_start failed; retrying (attempt %d)", reconnect_attempt)
-                    await _sleep_backoff(reconnect_attempt)
-                    reconnect_attempt += 1
-                    continue
-                highrise: Highrise | None = None
-                ka_task: asyncio.Task | None = None
-                try:
-                    timeout_obj = (
-                        ClientTimeout(total=30, sock_connect=10, sock_read=60)
-                        if ClientTimeout
-                        else None
-                    )
-                    async with ClientSession(timeout=timeout_obj) as session:
-                        subs = active_subscriptions(bot)
-                        url = f"{BASE_WS_URL}{_subscription_query(subs)}"
-                        async with session.ws_connect(
-                            url,
-                            headers={
-                                "room-id": room_id,
-                                "api-token": api_key,
-                                "user-agent": USER_AGENT,
-                            },
-                        ) as ws:
-                            ka_task = asyncio.create_task(_send_keepalive(ws))
-                            try:
-                                session_metadata = await _receive_metadata(ws)
-                                if isinstance(session_metadata, Error):
-                                    print(f"ERROR: {session_metadata}")
-                                    return
+                    try:
+                        async with TaskGroup() as tg:
+                            await bot.before_start(tg)
+                            subs = active_subscriptions(bot)
+                            async with session.ws_connect(
+                                f"{BASE_WS_URL}{_subscription_query(subs)}",
+                                headers={
+                                    "room-id": room_id,
+                                    "api-token": api_key,
+                                    "user-agent": USER_AGENT,
+                                },
+                            ) as ws:
+                                metadata = await _receive_metadata(ws)
+                                if isinstance(metadata, Error):
+                                    log.warning("Bot session rejected: %s", metadata.message)
+                                    if metadata.do_not_reconnect:
+                                        raise _DoNotReconnect
+                                    raise ConnectionResetError(metadata.message)
+
+                                tracker = getattr(bot, "room_tracker", None)
                                 highrise = Highrise(
-                                    ws=ws,
-                                    tg=tg,
-                                    my_id=str(session_metadata.user_id),
+                                    ws=ws, tg=tg, my_id=metadata.user_id, room_tracker=tracker
                                 )
+                                highrise.state_dirty = tracker is not None or not first_session
                                 bot.highrise = highrise
-                                _actions = getattr(bot, "actions", None)
-                                if _actions is not None and hasattr(_actions, "start"):
-                                    _actions.start()
+                                actions = getattr(bot, "actions", None)
+                                if actions is not None and hasattr(actions, "start"):
+                                    actions.start()
                                 if getattr(bot, "webapi", None) is None:
-                                    bot.webapi = WebAPI(cache_ttl=_WEBAPI_CACHE_TTL)
-                                if (
-                                    session_metadata.sdk_version is not None
-                                    and session_metadata.sdk_version != VERSION
-                                ):
-                                    log.debug(
-                                        "Server SDK version %s differs from running SDK %s",
-                                        session_metadata.sdk_version,
-                                        VERSION,
-                                    )
-                                if is_first_connect:
-                                    _spawn_task(
-                                        tg,
-                                        bot.on_start(session_metadata),
-                                        bot,
-                                        "on_start",
-                                    )
-                                    is_first_connect = False
-                                else:
-                                    log.info("Reconnected — running on_reconnected hook (attempt %d)", reconnect_attempt)
-                                    try:
-                                        await bot.on_reconnected()
-                                    except Exception:
-                                        log.debug("on_reconnected hook failed", exc_info=True)
-                                _maybe_tune_gc()
-                                asyncio.get_running_loop().call_later(
-                                    5.5, _maybe_tune_gc
-                                )
-                                reconnect_attempt = 0
-                                await _receive_loop(
-                                    ws,
-                                    highrise,
-                                    bot,
-                                    tg,
-                                    session_metadata,
-                                    subs or None,
-                                )
-                            finally:
-                                if highrise is not None:
-                                    highrise.fail_pending("connection lost")
-                                await _cancel_and_wait(ka_task)
-                                ka_task = None
+                                    bot.webapi = WebAPI()
+                                if metadata.sdk_version and metadata.sdk_version != VERSION:
+                                    log.debug("Server SDK version %s differs from %s", metadata.sdk_version, VERSION)
+
+                                keepalive = asyncio.create_task(_send_keepalive(ws))
+                                gc_timer = None
+                                try:
+                                    if first_session:
+                                        if tracker is not None:
+                                            tg.create_task(_safe_handler(highrise._refresh_room()))
+                                        hook, name = bot.on_start(metadata), "on_start"
+                                        first_session = False
+                                    else:
+                                        hook, name = bot.on_reconnected(), "on_reconnected"
+                                    tg.create_task(_safe_handler_with_metrics(hook, name, bot))
+                                    _maybe_tune_gc()
+                                    if _GC_FIRST_TUNE_TIME is not None and not _GC_FROZEN:
+                                        gc_timer = asyncio.get_running_loop().call_later(
+                                            5.5, _maybe_tune_gc
+                                        )
+                                    reconnect_attempt = 0
+                                    await _receive_loop(ws, highrise, bot, tg, metadata, subs or None)
+                                finally:
+                                    if gc_timer is not None:
+                                        gc_timer.cancel()
+                                    highrise.fail_pending()
+                                    _discard_buffered_chat(tg)
+                                    await _cancel_and_wait(keepalive)
+                                    if isinstance(actions, ThrottledActions):
+                                        await actions.stop()
+                    except BaseExceptionGroup as group:
+                        if len(group.exceptions) == 1:
+                            # TaskGroup wraps the receive-loop exception when it cancels its children.
+                            raise group.exceptions[0] from None
+                        raise
                 except _DoNotReconnect:
                     return
-                except asyncio.CancelledError:
-                    raise
                 except _FatalValidationError:
-                    log.critical("Fatal validation error; aborting bot_runner")
+                    log.critical("Fatal validation error; aborting bot runner")
                     raise
                 except (ConnectionResetError, TimeoutError):
-                    log.info("Connection lost/timeout; reconnecting (attempt %d)", reconnect_attempt)
-                    await _sleep_backoff(reconnect_attempt)
-                    reconnect_attempt += 1
+                    log.info("Connection lost or timed out; reconnecting (attempt %d)", reconnect_attempt)
                 except Exception as exc:
                     if _is_handshake_error(exc):
                         log.warning("WebSocket handshake failed; retrying (attempt %d)", reconnect_attempt)
                     else:
-                        log.exception("ERROR: reconnecting (attempt %d)...", reconnect_attempt)
-                    await _sleep_backoff(reconnect_attempt)
-                    reconnect_attempt += 1
-                finally:
-                    if ka_task is not None:
-                        await _cancel_and_wait(ka_task)
-    except asyncio.CancelledError:
-        raise
-    except _BASE_EXCEPTION_GROUP as eg:
-        if _contains_cancelled(eg) or _contains_fatal(eg):
-            raise
-        log.debug("TaskGroup exited with exception group", exc_info=True)
-    except Exception:
-        log.debug("bot_runner exited with unhandled exception", exc_info=True)
+                        log.exception("Bot connection failed; retrying (attempt %d)", reconnect_attempt)
+                await _sleep_backoff(reconnect_attempt)
+                reconnect_attempt += 1
     finally:
         await _close_bot_extras(bot)
         await stop_loop_lag_monitor()
@@ -4725,9 +4769,14 @@ async def control_runner(
                                 metadata = await _receive_control_metadata(ws)
 
                                 if isinstance(metadata, Error):
-                                    print(f"ERROR: {metadata}")
+                                    log.warning("Control session rejected: %s", metadata.message)
+                                    if metadata.do_not_reconnect:
+                                        raise _DoNotReconnect
+                                    raise ConnectionResetError(metadata.message)
 
-                                    return
+                                active_instances = set(metadata.instance_ids)
+                                for instance_id in instances_to_bots.keys() - active_instances:
+                                    instances_to_bots.pop(instance_id).cancel()
 
                                 for instance_id in metadata.instance_ids:
                                     _start_bot(instance_id)
@@ -4737,17 +4786,8 @@ async def control_runner(
                                 while True:
                                     frame = await ws.receive(READ_TIMEOUT)
 
-                                    if frame.type in CLOSE_TYPES:
-                                        print(
-                                            "Control connection with ID: "
-                                            f"{metadata.connection_id} closed by "
-                                            "server, reconnecting."
-                                        )
-
-                                        break
-
-                                    if frame.type == WSMsgType.ERROR:
-                                        return
+                                    if frame.type in CLOSE_TYPES or frame.type == WSMsgType.ERROR:
+                                        raise ConnectionResetError("Control socket closed")
 
                                     if frame.type not in (
                                         WSMsgType.TEXT,
@@ -4771,6 +4811,12 @@ async def control_runner(
                                         continue
 
                                     event_type = data.get("_type")
+
+                                    if event_type in _ERROR_TYPES:
+                                        error = _parse_error(data)
+                                        if error.do_not_reconnect:
+                                            raise _DoNotReconnect
+                                        raise ConnectionResetError(error.message)
 
                                     if event_type == "InstanceStartedEvent":
                                         instance_id = str(data.get("instance_id", ""))
@@ -4815,6 +4861,9 @@ async def control_runner(
                 except asyncio.CancelledError:
                     raise
 
+                except _DoNotReconnect:
+                    raise
+
                 except (ConnectionResetError, TimeoutError):
                     log.info("Control connection lost/timeout; reconnecting (attempt %d)", ctrl_attempt)
                     await _sleep_backoff(ctrl_attempt)
@@ -4840,6 +4889,8 @@ async def control_runner(
     except _BASE_EXCEPTION_GROUP as eg:
         if _contains_cancelled(eg) or _contains_fatal(eg):
             raise
+        if eg.subgroup(_DoNotReconnect) is not None:
+            return
 
         log.debug(
             "Control TaskGroup exited with exception group",
@@ -4898,7 +4949,7 @@ def _performance_gate(max_ms_per_1000: float = 100.0, strict: bool = True) -> di
     """
     import time as _time
 
-    from .validation import BASE_PAYLOADS, HighriseFastValidationError, validate_server_message
+    from .validation import BASE_PAYLOADS, validate_server_message
 
     sample = None
     if BASE_PAYLOADS:
@@ -4914,12 +4965,7 @@ def _performance_gate(max_ms_per_1000: float = 100.0, strict: bool = True) -> di
     t0 = _time.perf_counter()
     n = 1000
     for _ in range(n):
-        try:
-            validate_server_message(sample)
-        except HighriseFastValidationError:
-            pass
-        except Exception:
-            pass
+        validate_server_message(sample)
     dt_ms = (_time.perf_counter() - t0) * 1000.0
     per_msg_us = (dt_ms / n) * 1000.0
 
@@ -4942,18 +4988,7 @@ def _performance_gate(max_ms_per_1000: float = 100.0, strict: bool = True) -> di
 
 
 def _run_benchmarks_consolidated(verbose: bool = False) -> int:
-    """Consolidated benchmark entry point (merges V1-V7 conceptually).
-
-    In the GitHub repo, Benchmarks/ contains 9 files V1..V7. This function
-    is the single maintained entry point that CI should call, replacing the
-    need to run each version separately. It runs:
-    - Internal SDK tests (fuzzer + protocol)
-    - Performance gate (hard fail if validation slows)
-    - Unified parse vs old parse timing
-    - Loop-lag / GC snapshot if available
-
-    Returns 0 on success, 1 on failure.
-    """
+    """Time structural validation and check parser, backoff, and stats behavior."""
     print("=== highrise_fast consolidated benchmarks ===")
     import platform
 
@@ -5110,21 +5145,15 @@ def _doctor_check() -> int:
         ok = False
 
     print("\nToken check:")
-    print("  (No token provided to doctor — checking env var HR token pattern if present)")
-    print("  ℹ Highrise bot tokens are typically 80+ chars, no spaces, no 'Bearer' prefix")
+    token = os.environ.get("HR_BOT_TOKEN", "")
+    print(f"  HR_BOT_TOKEN is {'set' if token else 'unset'}")
 
     print("\nEnv flags:")
     print(f"  HR_WS_BINARY={os.environ.get('HR_WS_BINARY','0')} -> {'BINARY' if _WS_BINARY_FRAMES else 'TEXT (default, proxy-safe)'}")
     if _WS_BINARY_FRAMES:
         print("  ⚠ BINARY frames enabled — ensure endpoint accepts binary or you will be muted")
-    print(f"  HR_SDK_REQ_TIMEOUT / SDK_FAST_REQ_TIMEOUT -> _REQ_TIMEOUT={_REQ_TIMEOUT}s (0=disabled, now default 10s)")
-    if _REQ_TIMEOUT <= 0:
-        print("  ⚠ Send timeout disabled — RPC can hang forever on dropped response")
-    else:
-        hard_ceiling = Highrise._RPC_HARD_TIMEOUT
-        print(
-            f"  ✓ Send timeout {_REQ_TIMEOUT}s enabled (hard ceiling {hard_ceiling}s)"
-        )
+    rpc_timeout = _REQ_TIMEOUT if _REQ_TIMEOUT > 0 else Highrise._RPC_HARD_TIMEOUT
+    print(f"  RPC deadline: {rpc_timeout:g}s for send and reply")
 
     print("\nGC state:")
     try:
@@ -5253,33 +5282,33 @@ def main() -> None:
     raw_args = sys.argv[1:]
     if raw_args and raw_args[0].lower() == "doctor":
         sys.exit(_doctor_check())
-    if any(a in ("--doctor", "-d") for a in raw_args):
+    if raw_args in (["--doctor"], ["-d"]):
         sys.exit(_doctor_check())
+    if raw_args in (["bench"], ["--bench"]):
+        sys.exit(_run_benchmarks_consolidated())
+    if raw_args in (["self-test"], ["--self-test"]):
+        run_internal_tests()
+        return
 
     parser = argparse.ArgumentParser(
-        description="Run a Highrise bot using the standalone fast SDK. Use 'doctor' subcommand for diagnostics."
+        description="Run a Highrise bot.",
+        epilog="Commands: doctor (diagnostics), bench (benchmark), self-test (offline checks).",
     )
-
-    subparsers = parser.add_subparsers(dest="subcommand")
-
-    subparsers.add_parser("doctor", help="Run self-diagnostic checks")
 
     parser.add_argument(
         "bot_path",
-        nargs="?",
         help="Module path and class name (e.g. module:ClassName)",
     )
 
     parser.add_argument(
         "room_id",
-        nargs="?",
         help="Room ID",
     )
 
     parser.add_argument(
         "api_token",
         nargs="?",
-        help="API Token",
+        help="API token (defaults to HR_BOT_TOKEN)",
     )
 
     parser.add_argument(
@@ -5307,14 +5336,9 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.subcommand == "doctor":
-        sys.exit(_doctor_check())
-
-    if not args.bot_path or not args.room_id or not args.api_token:
-        if args.bot_path and args.bot_path.lower() == "doctor":
-            sys.exit(_doctor_check())
-        parser.print_help()
-        sys.exit(2)
+    token = args.api_token or os.environ.get("HR_BOT_TOKEN")
+    if not token:
+        parser.error("provide an API token or set HR_BOT_TOKEN")
 
     if args.validation:
         os.environ["HIGHRISE_FAST_VALIDATION"] = args.validation
@@ -5326,7 +5350,7 @@ def main() -> None:
 
     first_room_id = args.room_id
 
-    first_token = args.api_token
+    first_token = token
 
     if first_room_id.startswith("3d/"):
         room_id = first_room_id[3:]

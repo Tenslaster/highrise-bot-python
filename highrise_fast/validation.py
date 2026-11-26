@@ -1791,6 +1791,13 @@ def _validate_error(payload: dict) -> None:
 
 
 
+def _validate_error_response(payload: dict) -> None:
+    """Validate the alternate error discriminator, which can carry only a rid."""
+    _require_default_optional_str(payload, "message", "$")
+    _require_default_bool(payload, "do_not_reconnect", "$")
+    _require_default_optional_str(payload, "rid", "$")
+
+
 def _validate_message_event(payload: dict) -> None:
 
     """Validate a MessageEvent payload."""
@@ -2310,6 +2317,8 @@ _DISPATCH = {
     "MessageEvent": _validate_message_event,
 
     "Error": _validate_error,
+
+    "ErrorResponse": _validate_error_response,
 
     "GetWalletResponse": _validate_wallet,
 
