@@ -141,6 +141,27 @@ that should survive reconnects and stop when the bot shuts down. Use
 `self.highrise.call_in(callback, delay)` for delayed work scoped to the
 current connection.
 
+### One loop per user
+
+Use `self.highrise.tasks.replace(key, factory)` to restart a connection-scoped
+task. The factory runs after the previous task for that key finishes cleanup.
+Use `await self.highrise.tasks.cancel_key(key)` to stop the loop and wait for
+cleanup. These tasks are cancelled when the room connection ends.
+
+```python
+# Inside an async command handler, using your own play_emotes coroutine
+room = self.highrise
+room.tasks.replace(("emote", user.id), lambda: self.play_emotes(user.id))
+# In your stop command
+await room.tasks.cancel_key(("emote", user.id))
+```
+
+Use the same keyed methods on `self.tasks` for jobs you want to keep across
+reconnects, such as polling a radio stream. `self.highrise.connected` reports
+whether the current client has an open room socket.
+
+### Room state and prompts
+
 Session metadata includes the connection ID and bot user ID, room info, and
 server-provided rate limits. Named limits use `(limit, period)` pairs.
 
@@ -157,6 +178,10 @@ automatic startup roster read and the tracker’s event subscriptions.
 
 The SDK also exposes `self.actions` for throttled actions, `self.prompts` to
 await user replies, and `CommandRegistry` for decorated commands.
+`await self.prompts.ask(self, user, question)` listens before sending the
+whisper and returns the reply text, or `None` if it times out or is replaced.
+Set `enable_prompts=True` in `BaseBot.__init__` to subscribe to chat when
+your bot has no chat or whisper hook. Prompts are cancelled on disconnect.
 `DebouncedSaver` coalesces state updates, serializes writes, and flushes the
 latest pending update when you await `stop()`.
 
@@ -213,6 +238,15 @@ caller.
 concurrent request sharing with a positive TTL and stores zero responses
 after each request completes. Use `api.cache_info()` to inspect cache hits,
 misses, shared reads, and outgoing requests.
+
+Use `WebAPI(retries=2, max_retry_delay=10)` to retry public GETs on
+HTTP 429, 502, 503, or 504. The client honors `Retry-After` and surfaces
+the response immediately if the delay exceeds your limit. For HTTP errors,
+`WebAPIError` is a `ResponseError` with `status` and `retry_after`
+attributes. [HTTP Retry-After](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Retry-After)
+
+`UserResolver(api, maxsize=1024)` bounds the username and ID lookup caches
+independently. `ttl=0` disables those lookup caches.
 
 Stream cursor-based collections with `iter_items`, `iter_users`,
 `iter_rooms`, `iter_posts`, or `iter_grabs`. Each iterator accepts the

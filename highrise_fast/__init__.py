@@ -73,6 +73,7 @@ from collections import Counter, deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from enum import Enum
 from functools import partial
 from inspect import isawaitable, iscoroutine
@@ -228,6 +229,7 @@ from .models import (
     UserLeftEvent,
     UserMovedEvent,
     VoiceEvent,
+    WebAPIError,
     _DoNotReconnect,
 )
 from .models_webapi import (
@@ -258,7 +260,7 @@ except ImportError:  # pragma: no cover - compatibility with older extras
     from .extras import WebAPI as CachedWebAPI  # noqa: F401
 
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 
 __all__ = [
@@ -332,6 +334,7 @@ __all__ = [
     "ValidationErrorDetail",
     "VoiceEvent",
     "WebAPI",
+    "WebAPIError",
     "CommandContext",
     "CommandRegistry",
     "RoomTracker",
@@ -2428,6 +2431,7 @@ class BaseBot:
     validation_mode: str | None = None
     on_invalid: str | None = None
     invalid_warn_cooldown: float | None = None
+    enable_prompts = False
 
     def __init__(
         self,
@@ -2436,12 +2440,14 @@ class BaseBot:
         on_invalid: str | None = None,
         invalid_warn_cooldown: float | None = None,
         track_room: bool = True,
+        enable_prompts: bool = False,
     ) -> None:
         """Initialize the instance."""
         self.metrics = Metrics()
         self.tasks = TaskManager()
         self.room_tracker = RoomTracker() if track_room else None
         self.prompts = PromptManager()
+        self.enable_prompts = enable_prompts
         self.actions = ThrottledActions(self)
 
         if getattr(self, "command_registry", None) is None:
@@ -2581,6 +2587,8 @@ class Highrise:
 
         self.my_id = my_id
         self._room_tracker = room_tracker
+        self._session_closed = False
+        self._session_tasks: TaskManager | None = None
 
         self._req_id = count()
 
@@ -2596,6 +2604,27 @@ class Highrise:
         self.state_dirty: bool = False
 
         self.dropped_packets: int = 0
+
+    @property
+    def connected(self) -> bool:
+        """Return whether this client currently has an open room connection."""
+        return not self._session_closed and self.ws is not None and not getattr(self.ws, "closed", False)
+
+    @property
+    def tasks(self) -> TaskManager:
+        """Background tasks owned by this room connection."""
+        if self._session_closed:
+            raise ConnectionResetError("The room connection has ended")
+        if self._session_tasks is None:
+            self._session_tasks = TaskManager()
+        return self._session_tasks
+
+    async def _close_session(self) -> None:
+        self._session_closed = True
+        self.fail_pending()
+        self._ff_rids.clear()
+        if self._session_tasks is not None:
+            await self._session_tasks.close()
 
     def mark_state_synced(self) -> None:
         """Clear the state_dirty flag after re-syncing room state."""
@@ -2680,7 +2709,8 @@ class Highrise:
         fields: dict[str, Any] | None = None,
     ) -> None:
         """Send a WebSocket payload without waiting for a response."""
-
+        if self._session_closed:
+            raise ConnectionResetError("The room connection has ended")
         rid = self._next_rid()
 
         payload: dict[str, Any] = {
@@ -2717,6 +2747,8 @@ class Highrise:
         request: Any = None,
     ) -> Any:
         """Send a WebSocket RPC call and wait for the response."""
+        if self._session_closed:
+            raise ConnectionResetError("The room connection has ended")
         rid = self._next_rid()
         if request is not None:
             request.rid = rid
@@ -3196,6 +3228,24 @@ class Highrise:
 class _WebPayload:
     raw: Any
     parsed: Any = _EXTRAS_MISSING
+    model: Any = _EXTRAS_MISSING
+
+
+_RETRYABLE_WEB_STATUSES = frozenset({429, 502, 503, 504})
+
+
+def _retry_after(value: str | None) -> float | None:
+    if not value:
+        return None
+    if value.isascii() and value.isdigit():
+        return float(value)
+    try:
+        when = parsedate_to_datetime(value)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        return max(0.0, when.timestamp() - time.time())
+    except (ValueError, TypeError, OverflowError, OSError):
+        return None
 
 
 class WebAPI:
@@ -3210,9 +3260,17 @@ class WebAPI:
         timeout: Any | None = None,
         cache_ttl: int | None = None,
         cache_size: int = 1024,
+        retries: int = 0,
+        max_retry_delay: float = 10.0,
     ) -> None:
         """Initialize the instance."""
         _ensure_aiohttp()
+        if not isinstance(retries, int) or retries < 0:
+            raise ValueError("retries must be a nonnegative integer")
+        if not math.isfinite(max_retry_delay) or max_retry_delay < 0:
+            raise ValueError("max_retry_delay must be nonnegative and finite")
+        self.retries = retries
+        self.max_retry_delay = max_retry_delay
 
         if base_url is not None:
             self.url = base_url.rstrip("/")
@@ -3258,7 +3316,11 @@ class WebAPI:
     async def send_request(self, endpoint: str, cl: type | None = None) -> Any:
         """Send a public Web API request, optionally structuring its response."""
         payload = await self._get(endpoint)
-        model = self._response_type(endpoint)
+        if cl is None and payload.parsed is not _EXTRAS_MISSING:
+            return payload.parsed
+        if payload.model is _EXTRAS_MISSING:
+            payload.model = self._response_type(endpoint)
+        model = payload.model
         if cl is not None and cl is not model:
             return self._structure_response(payload.raw, cl)
         if payload.parsed is _EXTRAS_MISSING:
@@ -3266,7 +3328,10 @@ class WebAPI:
         return payload.parsed
 
     async def _get_public(self, endpoint: str) -> Any:
-        return await self.send_request(endpoint, self._response_type(endpoint))
+        send = self.send_request
+        if getattr(send, "__func__", None) is WebAPI.send_request:
+            return await send(endpoint)
+        return await send(endpoint, self._response_type(endpoint))
 
     @staticmethod
     def _structure_response(data: Any, cl: type | None) -> Any:
@@ -3306,13 +3371,28 @@ class WebAPI:
 
     async def _fetch(self, endpoint: str) -> _WebPayload:
         session = await self._get_session()
-
-        self._http_requests += 1
-        async with session.get(f"{self.url}{endpoint}") as response:
-            payload = await response.read()
-            if response.status == 200:
-                return _WebPayload(loads_json(payload))
-            raise ResponseError(payload.decode("utf-8", errors="replace"))
+        url = f"{self.url}{endpoint}"
+        attempt = 0
+        while True:
+            self._http_requests += 1
+            async with session.get(url) as response:
+                payload = await response.read()
+                if response.status == 200:
+                    return _WebPayload(loads_json(payload))
+                error = WebAPIError(
+                    payload.decode("utf-8", errors="replace"),
+                    response.status,
+                    _retry_after(response.headers.get("Retry-After")),
+                )
+            if attempt >= self.retries or error.status not in _RETRYABLE_WEB_STATUSES:
+                raise error
+            delay = error.retry_after
+            if delay is None:
+                delay = min(self.max_retry_delay, 0.25 * 2 ** min(attempt, 8))
+            if delay > self.max_retry_delay:
+                raise error
+            attempt += 1
+            await asyncio.sleep(delay)
 
     def _request_done(self, endpoint: str, ttl: int, task: asyncio.Task[Any]) -> None:
         self._requests.discard(task)
@@ -3683,6 +3763,8 @@ def active_subscriptions(bot: BaseBot) -> frozenset[str]:
     subs: set[str] = set()
     if getattr(bot, "room_tracker", None) is not None:
         subs.update({"user_joined", "user_left", "user_moved"})
+    if getattr(bot, "enable_prompts", False):
+        subs.add("chat")
     registry = getattr(bot, "command_registry", None) or commands
     if getattr(registry, "has_commands", True):
         subs.update({"chat", "message"})
@@ -4349,6 +4431,7 @@ async def _receive_loop(
     validation_mode, on_invalid, warn_cooldown = _resolve_validation_settings(bot)
 
     strict = validation_mode == "strict"
+    decode = orjson.loads if orjson is not None else loads_json
 
     if not strict:
         log.info("Validation mode is 'lenient': incoming packets are not validated")
@@ -4374,7 +4457,7 @@ async def _receive_loop(
             continue
 
         try:
-            data = loads_json(frame.data)
+            data = decode(frame.data)
 
         except (ValueError, TypeError, UnicodeDecodeError):
             _STATS["incoming_fallback"] += 1
@@ -4741,11 +4824,16 @@ async def bot_runner(bot: BaseBot, room_id: str, api_key: str) -> None:
                                 finally:
                                     if gc_timer is not None:
                                         gc_timer.cancel()
-                                    highrise.fail_pending()
                                     _discard_buffered_chat(tg)
-                                    await _cancel_and_wait(keepalive)
-                                    if isinstance(actions, ThrottledActions):
-                                        await actions.stop()
+                                    prompts = getattr(bot, "prompts", None)
+                                    if isinstance(prompts, PromptManager):
+                                        prompts.cancel_all()
+                                    try:
+                                        await highrise._close_session()
+                                    finally:
+                                        await _cancel_and_wait(keepalive)
+                                        if isinstance(actions, ThrottledActions):
+                                            await actions.stop()
                     except BaseExceptionGroup as group:
                         if len(group.exceptions) == 1:
                             # TaskGroup wraps the receive-loop exception when it cancels its children.

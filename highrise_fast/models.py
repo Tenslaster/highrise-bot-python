@@ -505,6 +505,15 @@ class ResponseError(Exception):
     pass
 
 
+class WebAPIError(ResponseError):
+    """HTTP failure with the status code and optional retry delay."""
+
+    def __init__(self, message: str, status: int, retry_after: float | None = None):
+        super().__init__(message)
+        self.status = status
+        self.retry_after = retry_after
+
+
 class _DoNotReconnect(Exception):  # noqa: N818 - internal control-flow signal
     """Internal exception used to stop reconnecting."""
     pass

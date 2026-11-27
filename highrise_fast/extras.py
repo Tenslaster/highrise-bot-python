@@ -10,7 +10,7 @@ import math
 import time
 import types
 from collections import OrderedDict, defaultdict
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Hashable
 from typing import Any
 
 try:
@@ -341,151 +341,44 @@ WebAPI = CachedWebAPI
 
 
 class UserResolver:
-
-    """Bidirectional username <-> user ID resolver with caching.
-
-
-
-    Wraps a WebAPI instance and caches resolved pairs so repeated lookups
-
-    for the same username/id are answered from memory instead of hitting
-
-    the network.
-
-
-
-    Usage::
-
-
-
-        resolver = UserResolver(webapi)
-
-        uid = await resolver.username_to_id("alice")
-
-        uname = await resolver.id_to_username(uid)
-
-    """
-
-
+    """Bidirectional username and ID lookup with bounded, expiring caches."""
 
     __slots__ = ("_webapi", "_username_cache", "_id_cache", "_ttl")
 
-
-
-    def __init__(self, webapi: Any, *, ttl: int = 300) -> None:
-
-        """Create a resolver backed by ``webapi`` with a positive TTL cache."""
-
+    def __init__(self, webapi: Any, *, ttl: int = 300, maxsize: int = 1024) -> None:
         self._webapi = webapi
-
-        self._username_cache: dict[str, tuple[float, str]] = {}
-
-        self._id_cache: dict[str, tuple[float, str]] = {}
-
+        self._username_cache = TTLCache(maxsize)
+        self._id_cache = TTLCache(maxsize)
         self._ttl = max(0, int(ttl))
 
-
-
-    def _cache_get(self, cache: dict, key: str) -> str | None:
-
-        """Return a non-expired cached value, or None."""
-
-        entry = cache.get(key)
-
-        if entry is None:
-
-            return None
-
-        expires_at, value = entry
-
-        if time.monotonic() < expires_at:
-
-            return value
-
-        cache.pop(key, None)
-
-        return None
-
-
-
-    def _cache_set(self, cache: dict, key: str, value: str) -> None:
-
-        """Store a value with the configured TTL."""
-
-        if self._ttl > 0:
-
-            cache[key] = (time.monotonic() + self._ttl, value)
-
-
-
     def _link(self, uid: str, username: str) -> None:
-
-        """Cross-populate both caches for a resolved (uid, username) pair."""
-
-        self._cache_set(self._id_cache, str(uid), username)
-
-        self._cache_set(self._username_cache, username.strip().lower(), str(uid))
-
-
+        self._id_cache.set(str(uid), username, self._ttl)
+        self._username_cache.set(username.strip().lower(), str(uid), self._ttl)
 
     async def username_to_id(self, username: str) -> str | None:
-
-        """Resolve a username to a user ID, using the cache when possible."""
-
         key = username.strip().lower()
-
-        cached = self._cache_get(self._username_cache, key)
-
-        if cached is not None:
-
-            return cached
-
+        cached_id = self._username_cache.get(key)
+        if cached_id is not MISSING:
+            return cached_id
         uid = await self._webapi.username_to_id(username)
-
         if uid is not None:
-
             self._link(uid, username)
-
         return uid
 
-
-
     async def id_to_username(self, user_id: str) -> str | None:
-
-        """Resolve a user ID to a username, using the cache when possible."""
-
         key = str(user_id)
-
-        cached = self._cache_get(self._id_cache, key)
-
-        if cached is not None:
-
-            return cached
-
-        uname = await self._webapi.id_to_username(key)
-
-        if uname is not None:
-
-            self._link(key, uname)
-
-        return uname
-
-
+        cached_name = self._id_cache.get(key)
+        if cached_name is not MISSING:
+            return cached_name
+        username = await self._webapi.id_to_username(key)
+        if username is not None:
+            self._link(key, username)
+        return username
 
     def clear(self) -> None:
-
         """Clear both caches."""
-
         self._username_cache.clear()
-
         self._id_cache.clear()
-
-
-
-
-
-
-
 
 
 class MetricTracker:
@@ -628,66 +521,119 @@ class Metrics:
 
 
 
-class TaskManager:
-
-    """Asyncio task manager for safe background tasks."""
-
-
+class _TaskSlot:
+    __slots__ = ("lock", "active", "latest")
 
     def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.active: set[asyncio.Task[Any]] = set()
+        self.latest: asyncio.Task[Any] | None = None
 
-        """Start with an empty tracked-task set."""
 
+class TaskManager:
+    """Track background tasks and run at most one task body per key."""
+
+    def __init__(self) -> None:
         self._tasks: set[asyncio.Task[Any]] = set()
-
-
+        self._cancelling: set[asyncio.Task[Any]] = set()
+        self._slots: dict[Hashable, _TaskSlot] = {}
+        self._closed = False
 
     def _task_done(self, task: asyncio.Task[Any]) -> None:
-
-        """Discard a finished task and log any exception it raised."""
-
         self._tasks.discard(task)
+        self._cancelling.discard(task)
+        if not task.cancelled():
+            exc = task.exception()
+            if exc is not None:
+                logger.error("Background task crashed: %r", exc, exc_info=exc)
 
-        if task.cancelled():
+    def _keyed_done(self, key: Hashable, slot: _TaskSlot, task: asyncio.Task[Any]) -> None:
+        slot.active.discard(task)
+        if not slot.active:
+            self._slots.pop(key)
+        self._task_done(task)
 
-            return
-
-        exc = task.exception()
-
-        if exc is not None:
-
-            logger.error("Background task crashed: %r", exc, exc_info=exc)
-
-
-
-    def spawn(self, coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
-
-        """Spawn a new task from a coroutine and add it to the task manager."""
-
-        task = asyncio.create_task(coro)
-
-        self._tasks.add(task)
-
-        task.add_done_callback(self._task_done)
-
-        return task
-
-
-
-    async def cancel_all(self) -> None:
-
-        """Cancel every tracked task and wait for them to finish."""
-
-        for task in list(self._tasks):
-
+    def _cancel_task(self, task: asyncio.Task[Any]) -> None:
+        if task not in self._cancelling and not task.done():
+            self._cancelling.add(task)
             task.cancel()
 
-        if self._tasks:
+    def spawn(self, coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
+        """Spawn a managed background task."""
+        try:
+            if self._closed:
+                raise RuntimeError("Task manager is closed")
+            task = asyncio.create_task(coro)
+        except BaseException:
+            if inspect.iscoroutine(coro):
+                coro.close()
+            raise
+        self._tasks.add(task)
+        task.add_done_callback(self._task_done)
+        return task
 
-            await asyncio.gather(*self._tasks, return_exceptions=True)
+    def replace(
+        self, key: Hashable, factory: Callable[[], Coroutine[Any, Any, Any]]
+    ) -> asyncio.Task[Any]:
+        """Cancel the current task for key and start the new one after cleanup."""
+        if self._closed:
+            raise RuntimeError("Task manager is closed")
+        loop = asyncio.get_running_loop()
+        slot = self._slots.get(key)
+        if slot is None:
+            slot = self._slots[key] = _TaskSlot()
+        registered = loop.create_future()
 
+        async def run() -> Any:
+            # Eager task factories can start the coroutine inside create_task().
+            await registered
+            async with slot.lock:
+                return await factory()
 
+        previous = slot.latest
+        body = run()
+        try:
+            task = loop.create_task(body)
+        except BaseException:
+            body.close()
+            if not slot.active:
+                self._slots.pop(key)
+            raise
+        if previous is not None:
+            self._cancel_task(previous)
+        slot.latest = task
+        slot.active.add(task)
+        self._tasks.add(task)
+        task.add_done_callback(functools.partial(self._keyed_done, key, slot))
+        registered.set_result(None)
+        return task
 
+    async def cancel_key(self, key: Hashable) -> bool:
+        """Cancel a task by key and wait for its pending cleanup."""
+        slot = self._slots.get(key)
+        if slot is None:
+            return False
+        if asyncio.current_task() in slot.active:
+            raise RuntimeError("A keyed task cannot await its own cancellation")
+        tasks = tuple(slot.active)
+        for task in tasks:
+            self._cancel_task(task)
+        await asyncio.shield(asyncio.gather(*tasks, return_exceptions=True))
+        return True
+
+    async def cancel_all(self) -> None:
+        """Cancel tasks active at the time of the call and wait for cleanup."""
+        current = asyncio.current_task()
+        tasks = self._tasks - {current}
+        for task in tasks:
+            self._cancel_task(task)
+        if tasks:
+            await asyncio.shield(asyncio.gather(*tasks, return_exceptions=True))
+
+    async def close(self) -> None:
+        """Stop accepting tasks and cancel the current tasks."""
+        self._closed = True
+        await self.cancel_all()
 
 
 def cached(ttl: int = 60) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
@@ -2021,99 +1967,58 @@ class DebouncedSaver:
 
 
 class PromptManager:
-
-    """Allows bot to 'await' a user's chat reply."""
-
-
+    """Send a private prompt and consume the matching user's next reply."""
 
     def __init__(self):
+        self._waiters: dict[str, asyncio.Future[str | None]] = {}
 
-        """Start with no pending waiters."""
-
-        self._waiters: dict[str, asyncio.Future] = {}
-
-
-
-    async def ask(
-
-        self, bot, user, question: str, timeout: float = 15.0
-
-    ) -> str | None:
-
-        """Whisper a question and await the user's reply, or None on timeout.
-
-
-
-        If ``ask`` is called again for the same user before the first call
-
-        resolves, the newer call takes over the slot. The older call is
-
-        left to time out on its own; the older call will **not** disturb
-
-        the newer call's slot during cleanup.
-
-        """
-
-        if getattr(bot, "highrise", None):
-
-            await bot.highrise.send_whisper(user.id, question)
-
-
-
-        loop = asyncio.get_running_loop()
-
-        future = loop.create_future()
-
-        self._waiters[user.id] = future
-
-
-
+    async def ask(self, bot, user, question: str, timeout: float = 15.0) -> str | None:
+        """Wait for a reply, returning None on timeout or replacement."""
+        user_id = user.id
+        connection = getattr(bot, "highrise", None)
+        future = asyncio.get_running_loop().create_future()
+        previous = self._waiters.get(user_id)
+        if previous is not None and not previous.done():
+            previous.set_result(None)
+        self._waiters[user_id] = future
         try:
-
-            return await asyncio.wait_for(future, timeout=timeout)
-
-        except TimeoutError:
-
-            if getattr(bot, "highrise", None):
-
-                await bot.highrise.send_whisper(user.id, "⏰ Timed out.")
-
-            return None
-
+            if connection is not None:
+                await connection.send_whisper(user_id, question)
+            try:
+                return await asyncio.wait_for(future, timeout)
+            except asyncio.TimeoutError:
+                if (
+                    connection is not None
+                    and getattr(bot, "highrise", None) is connection
+                    and self._waiters.get(user_id) is future
+                ):
+                    await connection.send_whisper(user_id, "⏰ Timed out.")
+                return None
         finally:
-
-            if self._waiters.get(user.id) is future:
-
-                self._waiters.pop(user.id, None)
-
-
+            if self._waiters.get(user_id) is future:
+                self._waiters.pop(user_id, None)
+            if not future.done():
+                future.cancel()
 
     def resolve(self, user_id: str, message: str) -> bool:
-
-        """Resolve a pending ask for ``user_id`` with ``message``."""
-
+        """Resolve the current prompt for this user."""
         future = self._waiters.get(user_id)
-
         if future is not None and not future.done():
-
             future.set_result(message.strip())
-
             return True
-
         return False
-
-
 
     def cancel(self, user_id: str) -> bool:
-
-        """Cancel any pending ask for ``user_id`` (disconnect cleanup)."""
-
+        """Cancel the current prompt for this user."""
         future = self._waiters.pop(user_id, None)
-
         if future is not None and not future.done():
-
             future.cancel()
-
             return True
-
         return False
+
+    def cancel_all(self) -> None:
+        """Cancel prompts when the room connection ends."""
+        waiters, self._waiters = self._waiters, {}
+        for future in waiters.values():
+            if not future.done():
+                future.cancel()
