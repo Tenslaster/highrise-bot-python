@@ -5,7 +5,7 @@ to the Bot API over WebSocket and reads public data through the Web API. It
 includes the standard `highrise` package and command, typed bot events, room
 tracking, and a shared HTTP cache. Python 3.10 or newer is required.
 
-[Drop-in upgrade](#drop-in-upgrade) · [Quick start](#quick-start) · [Bot API](#bot-api) · [Web API](#web-api) ·
+[Drop-in upgrade](#drop-in-upgrade) · [Quick start](#quick-start) · [Bot API](#bot-api) · [Bot toolkit](#bot-toolkit) · [Web API](#web-api) ·
 [Configuration](#configuration) · [Development](#development)
 
 ## Drop-in upgrade
@@ -215,6 +215,141 @@ sender and deduplicates recent command IDs within a connection.
 `chunk_for_chat()` preserves message order across lines.
 `await send_long_message(room, text)` splits and numbers long messages within
 the configured character limit.
+
+## Bot toolkit
+
+Version 1.5 adds event waits, jobs, room activity tracking, persistent roles,
+and cancellation for queued interactions. Import the helpers from
+`highrise_fast.extras`, `highrise_fast`, or `highrise`.
+
+### Await events
+
+In your bot constructor, use `super().__init__(await_events=("reaction", "whisper"))`
+to subscribe to the event types you plan to wait for. Existing hooks, commands,
+and the room tracker still subscribe to their events automatically. A waiter
+receives the same arguments as the corresponding hook. The dispatcher still
+delivers the event through the usual hooks and command routing.
+
+```python
+# Inside a hook or command, start listening before sending the prompt.
+reply = self.awaiter.expect(
+    "whisper",
+    predicate=lambda sender, text: sender.id == user.id and text.casefold() == "yes",
+    timeout=20,
+)
+try:
+    await self.highrise.send_whisper(user.id, "Whisper yes to confirm.")
+    answer = await reply
+finally:
+    reply.cancel()
+
+if answer is not None:
+    sender, text = answer
+```
+
+| Method | Result |
+| --- | --- |
+| `expect(event, ...)` | Future registered immediately. Returns the hook arguments or `None` at the deadline. |
+| `await wait_for(event, ...)` | Hook arguments for the next match or `None` at the deadline. |
+| `await wait_any(*events, ...)` | `(event_name, hook_args)` for the first match, or `None` at the deadline. Its predicate receives the event name followed by the hook arguments. |
+| `await collect(event, count=..., unique_by=..., ...)` | A list of matches, including partial results at the deadline. Use `unique_by=lambda user, *args: user.id` for one vote per user. |
+
+The twelve event names are `chat`, `whisper`, `emote`, `reaction`, `user_join`,
+`user_leave`, `user_move`, `tip`, `channel`, `voice`, `message`, and `moderation`.
+`message` carries inbox notification metadata. Call `get_messages()` when
+you need the message contents. Pending waits are cancelled when the room
+connection closes. Use quick synchronous functions for predicates and keys.
+
+### Radio jobs and retries
+
+`PeriodicJob` runs one callback at a time on a monotonic schedule and skips
+missed ticks. Keep the job on your bot instance so repeated `start()` calls
+reuse the same task. Use `pause()`, `resume()`, and `await stop()` to control it.
+The job reports `runs`, `missed_ticks`, and `failures`.
+
+```python
+from highrise_fast.extras import ChangeDetector, PeriodicJob, RetryPolicy
+
+title_changed = ChangeDetector(key=str.strip)
+retry = RetryPolicy(attempts=3, delay=0.25, max_delay=2)
+
+# In your bot, with read_title() and announce() supplied by your radio integration.
+async def poll_title():
+    title = await retry.run(read_title)
+    if self.highrise.connected and title_changed.update(title):
+        await announce(title)
+
+self.radio_job = PeriodicJob(5, poll_title)
+self.radio_job.start(self.tasks)
+```
+
+Jobs on `self.tasks` survive reconnects. Use `self.highrise.tasks` for jobs
+that should stop at disconnect. `RetryPolicy` defaults to retrying I/O errors
+and timeouts. Use it for repeat-safe operations such as reading a song title
+or fetching a roster.
+
+### Playtime, occupancy, and roles
+
+Pass successful room snapshots to the two roster helpers. A fresh snapshot
+closes a player's active session if they disappeared, even if their leave
+event was missed. The occupancy trigger requires an empty snapshot confirming
+the room has been empty for the configured period before it fires on arrival.
+
+```python
+from highrise import Error
+from highrise_fast.extras import AtomicJsonStore, PresenceTimer, RoomOccupancyTrigger
+
+# Initialize once after you have the bot user ID from session metadata.
+options = {"exclude_ids": {metadata.user_id}, "exclude_usernames": {"R0_.YA__", "__R0_Sa"}}
+playtime_file = AtomicJsonStore("state/playtime.json")
+playtime = PresenceTimer(await playtime_file.load(default={}), **options)
+occupancy = RoomOccupancyTrigger(empty_seconds=10, **options)
+
+# Run on each successful poll.
+snapshot = await self.highrise.get_room_users()
+if not isinstance(snapshot, Error):
+    roster = {user.id: user.username for user, _ in snapshot.content}
+    playtime.observe(roster)
+    if occupancy.observe(roster):
+        await self.on_room_occupied()
+
+# Checkpoint periodically and at shutdown.
+await playtime_file.save(playtime.snapshot())
+```
+
+Use `playtime.seconds(user_id)` and `playtime.leaderboard(limit=10)` for
+`!time` and `!leadtimer`. `playtime.reset()` clears totals while starting fresh
+timers for current users. Call `playtime.pause()` and `occupancy.reset()`
+when you lose the connection. On reconnect, resume from a fresh roster.
+`AtomicJsonStore` does disk I/O off the event loop and writes completed
+snapshots with an atomic replacement. `DebouncedSaver` can coalesce frequent
+checkpoints. Use a separate state file for each independent bot or room.
+
+For local ranks, construct a `RoleStore` with `AtomicJsonStore("state/roles.json")`
+and `hierarchy=("mod", "owner")`. Call `await roles.load()` and
+`registry.set_permission_checker(roles.permission_checker)`. Grant roles by
+user ID with `roles.grant(user_id, role)`, revoke with `roles.revoke(...)`, and
+persist changes with `await roles.save()`. The hierarchy is ordered from
+lowest to highest. An `owner` in this example also passes `rank="mod"`.
+These ranks are configured by your bot and independent of Highrise room privileges.
+
+### Stop old emotes from playing after a loop ends
+
+Give your loop and its queued actions the same key. Expiry is measured from
+queue submission. Stopping removes actions still queued or waiting for a
+rate-limit token. A send that already started may complete.
+
+```python
+key = ("emote", user.id)
+await self.actions.emote("emote-dance", user.id, key=key, expires_in=1.5)
+
+# In the stop command.
+await self.highrise.tasks.cancel_key(key)
+self.actions.cancel_pending(key)
+```
+
+To run a single bot from Python, call `await bot.login(room_id, api_token)`.
+This uses the same connection manager as the CLI, including its reconnects.
 
 ## Web API
 

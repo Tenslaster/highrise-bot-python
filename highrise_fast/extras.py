@@ -7,11 +7,16 @@ import functools
 import inspect
 import logging
 import math
+import random
 import time
 import types
 from collections import OrderedDict, defaultdict
 from collections.abc import Awaitable, Callable, Coroutine, Hashable
+from dataclasses import dataclass
 from typing import Any
+
+from .bot_state import AtomicJsonStore, PresenceTimer, RoleStore, RoomOccupancyTrigger
+from .events import Awaiter
 
 try:
 
@@ -25,6 +30,14 @@ except ImportError:
 
 __all__ = [
 
+    "AtomicJsonStore",
+    "Awaiter",
+    "ChangeDetector",
+    "PeriodicJob",
+    "PresenceTimer",
+    "RoleStore",
+    "RetryPolicy",
+    "RoomOccupancyTrigger",
     "MISSING",
 
     "CachedWebAPI",
@@ -556,6 +569,128 @@ class TaskManager:
         await self.cancel_all()
 
 
+class PeriodicJob:
+    """Run a periodic coroutine without overlap, skipping missed ticks."""
+
+    def __init__(
+        self, interval: float, callback: Callable[[], Awaitable[Any]], *,
+        immediate: bool = True, continue_on_error: bool = True,
+    ) -> None:
+        if not math.isfinite(interval) or interval <= 0:
+            raise ValueError("interval must be finite and positive")
+        self.interval = interval
+        self.callback = callback
+        self.immediate = immediate
+        self.continue_on_error = continue_on_error
+        self._ready = asyncio.Event()
+        self._ready.set()
+        self._manager: TaskManager | None = None
+        self._task: asyncio.Task | None = None
+        self.runs = 0
+        self.failures = 0
+        self.missed_ticks = 0
+
+    def start(self, manager: TaskManager | None = None) -> asyncio.Task:
+        """Start the job once, optionally tying its lifetime to a bot or room."""
+        if self._task is not None and not self._task.done():
+            return self._task
+        owner = manager if manager is not None else TaskManager()
+        self._task = owner.replace(self, self._run)
+        self._manager = owner
+        return self._task
+
+    def pause(self) -> None:
+        """Pause future ticks while an active callback finishes."""
+        self._ready.clear()
+
+    def resume(self) -> None:
+        """Resume on the schedule, skipping ticks that elapsed while paused."""
+        self._ready.set()
+
+    async def stop(self) -> None:
+        """Cancel the job and wait for cleanup."""
+        if self._manager is not None:
+            await self._manager.cancel_key(self)
+
+    async def _run(self) -> None:
+        now = asyncio.get_running_loop().time
+        deadline = now() + (0.0 if self.immediate else self.interval)
+        while True:
+            await asyncio.sleep(max(0.0, deadline - now()))
+            await self._ready.wait()
+            started = now()
+            skipped = max(0, math.floor((started - deadline) / self.interval))
+            self.missed_ticks += skipped
+            deadline += (skipped + 1) * self.interval
+            self.runs += 1
+            try:
+                await self.callback()
+            except Exception:
+                self.failures += 1
+                if not self.continue_on_error:
+                    raise
+                logger.exception("Periodic job failed")
+
+            # Skip all ticks that elapsed during the callback.
+            finished = now()
+            if deadline < finished:
+                skipped = math.ceil((finished - deadline) / self.interval)
+                self.missed_ticks += skipped
+                deadline += skipped * self.interval
+
+
+class ChangeDetector:
+    """Report whether a value's comparison key has changed."""
+
+    def __init__(self, *, key: Callable[[Any], Any] | None = None, emit_initial: bool = True):
+        self._key = key
+        self._emit_initial = emit_initial
+        self._last = MISSING
+
+    def update(self, value: Any) -> bool:
+        current = value if self._key is None else self._key(value)
+        prior, self._last = self._last, current
+        return self._emit_initial if prior is MISSING else current != prior
+
+    def reset(self) -> None:
+        self._last = MISSING
+
+
+class RetryPolicy:
+    """Bounded exponential backoff for operations that are safe to repeat."""
+
+    def __init__(
+        self, *, attempts: int = 3, delay: float = 0.25,
+        max_delay: float = 5.0, jitter: float = 0.2,
+    ) -> None:
+        if not isinstance(attempts, int) or attempts < 1:
+            raise ValueError("attempts must be a positive integer")
+        if not all(math.isfinite(value) and value >= 0 for value in (delay, max_delay)):
+            raise ValueError("retry delays must be finite and nonnegative")
+        if not 0 <= jitter <= 1:
+            raise ValueError("jitter must be between 0 and 1")
+        self.attempts = attempts
+        self.delay = delay
+        self.max_delay = max_delay
+        self.jitter = jitter
+
+    async def run(
+        self, operation: Callable[[], Awaitable[Any]], *,
+        retry_on: tuple[type[Exception], ...] = (OSError, asyncio.TimeoutError),
+    ) -> Any:
+        """Retry only the supplied exception types and propagate the final error."""
+        delay = min(self.delay, self.max_delay)
+        for attempt in range(1, self.attempts + 1):
+            try:
+                return await operation()
+            except retry_on:
+                if attempt == self.attempts:
+                    raise
+                spread = delay * self.jitter
+                await asyncio.sleep(min(self.max_delay, random.uniform(delay - spread, delay + spread)))
+                delay = min(self.max_delay, delay * 2)
+
+
 def async_cached(ttl: float = 60, *, maxsize: int = 1024) -> Callable:
     """Cache async results and share concurrent calls with the same arguments."""
 
@@ -1010,6 +1145,18 @@ class _TokenBucket:
             await asyncio.sleep((1.0 - self.tokens) / self.rate)
 
 
+@dataclass(slots=True)
+class _QueuedAction:
+    method: str
+    args: tuple
+    key: Hashable | None
+    deadline: float | None
+    cancelled: bool = False
+
+    def expired(self) -> bool:
+        return self.deadline is not None and time.monotonic() >= self.deadline
+
+
 class ThrottledActions:
     """Queue room actions on independent chat, movement, and interaction workers."""
 
@@ -1029,7 +1176,8 @@ class ThrottledActions:
             "interaction": _TokenBucket(interaction_rate),
         }
         self._queue_size = queue_size
-        self._queues: dict[str, asyncio.Queue[tuple[str, tuple]]] = {}
+        self._queues: dict[str, asyncio.Queue[_QueuedAction]] = {}
+        self._waiting: dict[str, _QueuedAction] = {}
         self._workers: dict[str, asyncio.Task] = {}
         self._running = False
         self._queued = 0
@@ -1045,7 +1193,12 @@ class ThrottledActions:
             return
         self._running = True
 
-    def _enqueue(self, lane: str, method: str, *args) -> bool:
+    def _enqueue(
+        self, lane: str, method: str, *args, key: Hashable | None = None,
+        expires_in: float | None = None,
+    ) -> bool:
+        if expires_in is not None and (not math.isfinite(expires_in) or expires_in < 0):
+            raise ValueError("expires_in must be finite and nonnegative")
         if not self._running or (self._queue_size > 0 and self._queued >= self._queue_size):
             self.dropped_actions += 1
             return False
@@ -1053,32 +1206,50 @@ class ThrottledActions:
         if queue is None:
             queue = self._queues[lane] = asyncio.Queue()
             self._workers[lane] = asyncio.create_task(
-                self._worker(queue, self._buckets[lane]),
+                self._worker(lane, queue, self._buckets[lane]),
                 name=f"highrise-fast-actions-{lane}",
             )
-        queue.put_nowait((method, args))
+        deadline = None if expires_in is None else time.monotonic() + expires_in
+        queue.put_nowait(_QueuedAction(method, args, key, deadline))
         self._queued += 1
         return True
 
-    async def _worker(self, queue: asyncio.Queue, bucket: _TokenBucket) -> None:
+    async def _worker(
+        self, lane: str, queue: asyncio.Queue[_QueuedAction], bucket: _TokenBucket,
+    ) -> None:
         while True:
-            method, args = await queue.get()
+            action = await queue.get()
             self._queued -= 1
             try:
+                if action.expired():
+                    self.dropped_actions += 1
+                    continue
+                if action.key is not None:
+                    self._waiting[lane] = action
                 await bucket.acquire()
+                if self._waiting.get(lane) is action:
+                    del self._waiting[lane]
+                if action.cancelled or action.expired():
+                    bucket.tokens = min(bucket.capacity, bucket.tokens + 1)
+                    if not action.cancelled:
+                        self.dropped_actions += 1
+                    continue
                 hr = getattr(self.bot, "highrise", None)
                 if hr is not None:
-                    await getattr(hr, method)(*args)
+                    await getattr(hr, action.method)(*action.args)
                     self.sent_actions += 1
                 else:
                     self.dropped_actions += 1
             except asyncio.CancelledError:
-                self.dropped_actions += 1
+                if not action.cancelled:
+                    self.dropped_actions += 1
                 raise
             except Exception:
                 self.failed_actions += 1
-                logger.debug("Throttled action %s failed", method, exc_info=True)
+                logger.debug("Throttled action %s failed", action.method, exc_info=True)
             finally:
+                if self._waiting.get(lane) is action:
+                    del self._waiting[lane]
                 queue.task_done()
 
     async def chat(self, message: str) -> None:
@@ -1093,13 +1264,45 @@ class ThrottledActions:
         """Queue a teleport."""
         self._enqueue("movement", "teleport", user_id, dest)
 
-    async def emote(self, emote_id: str, target_user_id: str | None = None) -> bool:
-        """Queue an emote and report whether it was accepted."""
-        return self._enqueue("interaction", "send_emote", emote_id, target_user_id)
+    async def emote(
+        self, emote_id: str, target_user_id: str | None = None, *,
+        key: Hashable | None = None, expires_in: float | None = None,
+    ) -> bool:
+        """Queue an emote with an optional cancellation key and lifetime."""
+        return self._enqueue(
+            "interaction", "send_emote", emote_id, target_user_id, key=key, expires_in=expires_in
+        )
 
-    async def react(self, reaction: str, target_user_id: str) -> bool:
-        """Queue a reaction and report whether it was accepted."""
-        return self._enqueue("interaction", "react", reaction, target_user_id)
+    async def react(
+        self, reaction: str, target_user_id: str, *,
+        key: Hashable | None = None, expires_in: float | None = None,
+    ) -> bool:
+        """Queue a reaction with an optional cancellation key and lifetime."""
+        return self._enqueue(
+            "interaction", "react", reaction, target_user_id, key=key, expires_in=expires_in
+        )
+
+    def cancel_pending(self, key: Hashable) -> int:
+        """Remove matching actions before they are sent, including rate-limit waiters."""
+        if key is None:
+            raise ValueError("A cancellation key is required")
+        cancelled = 0
+        for waiting in self._waiting.values():
+            if waiting.key == key and not waiting.cancelled:
+                waiting.cancelled = True
+                cancelled += 1
+        for queue in self._queues.values():
+            # Keep unfinished counts nonzero until surviving actions are restored.
+            entries = [queue.get_nowait() for _ in range(queue.qsize())]
+            for action in entries:
+                if action.key == key:
+                    cancelled += 1
+                    self._queued -= 1
+                else:
+                    queue.put_nowait(action)
+                queue.task_done()
+        self.dropped_actions += cancelled
+        return cancelled
 
     def stats(self) -> dict[str, int]:
         """Report queue depth, completed sends, failures, and drops."""

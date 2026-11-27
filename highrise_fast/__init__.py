@@ -70,7 +70,7 @@ import time
 import urllib.parse
 import weakref
 from collections import Counter, deque
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -144,13 +144,22 @@ def _ensure_aiohttp() -> None:
     )
 
 
-from ._pycompat import BaseExceptionGroup, TaskGroup, TimeoutError, timeout as timeout_after
+from ._pycompat import BaseExceptionGroup, TaskGroup, TimeoutError
+from ._pycompat import timeout as timeout_after
 from .extras import (
+    AtomicJsonStore,
+    Awaiter,
+    ChangeDetector,
     CommandContext,
     CommandRegistry,
     DebouncedSaver,
     Metrics,
+    PeriodicJob,
+    PresenceTimer,
     PromptManager,
+    RetryPolicy,
+    RoleStore,
+    RoomOccupancyTrigger,
     RoomTracker,
     TaskManager,
     ThrottledActions,
@@ -246,8 +255,10 @@ from .models_webapi import (
     GetPublicUserResponse,
     GetPublicUsersResponse,
     SearchItemsResponse,
-    parse_webapi_response as parse_webapi_response,
     webapi_response_type,
+)
+from .models_webapi import (
+    parse_webapi_response as parse_webapi_response,
 )
 
 try:
@@ -261,10 +272,18 @@ except ImportError:  # pragma: no cover - compatibility with older extras
     from .extras import WebAPI as CachedWebAPI  # noqa: F401
 
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 
 __all__ = [
+    "AtomicJsonStore",
+    "Awaiter",
+    "ChangeDetector",
+    "PeriodicJob",
+    "PresenceTimer",
+    "RoleStore",
+    "RetryPolicy",
+    "RoomOccupancyTrigger",
     "AnchorHitResponse",
     "AnchorPosition",
     "BaseBot",
@@ -2444,6 +2463,7 @@ class BaseBot:
         invalid_warn_cooldown: float | None = None,
         track_room: bool = True,
         enable_prompts: bool = False,
+        await_events: Iterable[str] = (),
     ) -> None:
         """Initialize the instance."""
         self.metrics = Metrics()
@@ -2451,6 +2471,7 @@ class BaseBot:
         self.room_tracker = RoomTracker() if track_room else None
         self.prompts = PromptManager()
         self.enable_prompts = enable_prompts
+        self._awaiter = Awaiter(await_events) if await_events else None
         self.actions = ThrottledActions(self)
 
         if getattr(self, "command_registry", None) is None:
@@ -2462,6 +2483,18 @@ class BaseBot:
             self.on_invalid = on_invalid
         if invalid_warn_cooldown is not None:
             self.invalid_warn_cooldown = invalid_warn_cooldown
+
+    @property
+    def awaiter(self) -> Awaiter:
+        """Wait for room events using the same arguments as bot hooks."""
+        awaiter = getattr(self, "_awaiter", None)
+        if awaiter is None:
+            awaiter = self._awaiter = Awaiter()
+        return awaiter
+
+    async def login(self, room_id: str, api_token: str) -> None:
+        """Run this bot in a room using the SDK connection manager."""
+        await bot_runner(self, room_id, api_token)
 
     def on_invalid_packet(self, exc: Exception, raw: dict[str, Any]) -> Any:
         """Called for every packet that fails validation (may be sync or async)."""
@@ -3778,6 +3811,9 @@ def active_subscriptions(bot: BaseBot) -> frozenset[str]:
         subs.update({"user_joined", "user_left", "user_moved"})
     if getattr(bot, "enable_prompts", False):
         subs.add("chat")
+    awaiter = getattr(bot, "_awaiter", None)
+    if awaiter is not None:
+        subs.update(awaiter.subscriptions)
     registry = getattr(bot, "command_registry", None) or commands
     if _registry_handles(registry, "chat") or _registry_handles(registry, "whisper"):
         subs.add("chat")
@@ -4126,12 +4162,16 @@ def _dispatch_event(
         needed = _EVENT_TO_SUBSCRIPTION.get(event_type)
         if needed is not None and needed not in subscriptions:
             return False
+    awaiter = getattr(bot, "_awaiter", None)
+    publish = awaiter.emit if awaiter is not None and awaiter.pending_count and not buffered else None
     if event_type == "ChatEvent":
         user = parse_user(data.get("user"))
         if user is None or user.id == bot_id:
             return True
         message = str(data.get("message", ""))
         whisper = bool(data.get("whisper", False))
+        if publish is not None:
+            publish("whisper" if whisper else "chat", user, message)
         _prompts = getattr(bot, "prompts", None)
         if _prompts is not None and _prompts.resolve(user.id, message):
             return True
@@ -4191,9 +4231,12 @@ def _dispatch_event(
         if user is None:
             return True
         receiver = parse_user(data.get("receiver"))
+        emote_id = str(data.get("emote_id", ""))
+        if publish is not None:
+            publish("emote", user, emote_id, receiver)
         _spawn_task(
             tg,
-            bot.on_emote(user, str(data.get("emote_id", "")), receiver),
+            bot.on_emote(user, emote_id, receiver),
             bot,
             "EmoteEvent",
         )
@@ -4203,9 +4246,12 @@ def _dispatch_event(
         receiver = parse_user(data.get("receiver"))
         if user is None:
             return True
+        reaction = str(data.get("reaction", ""))
+        if publish is not None:
+            publish("reaction", user, reaction, receiver)
         _spawn_task(
             tg,
-            bot.on_reaction(user, str(data.get("reaction", "")), receiver),
+            bot.on_reaction(user, reaction, receiver),
             bot,
             "ReactionEvent",
         )
@@ -4218,6 +4264,8 @@ def _dispatch_event(
         _tracker = getattr(bot, "room_tracker", None)
         if _tracker is not None:
             _tracker.add(user, position)
+        if publish is not None:
+            publish("user_join", user, position)
         handler = bot.on_user_join
         if getattr(handler, "__func__", None) is not BaseBot.on_user_join:
             _spawn_task(
@@ -4234,6 +4282,8 @@ def _dispatch_event(
         _tracker = getattr(bot, "room_tracker", None)
         if _tracker is not None:
             _tracker.remove(user.id)
+        if publish is not None:
+            publish("user_leave", user)
         handler = bot.on_user_leave
         if getattr(handler, "__func__", None) is not BaseBot.on_user_leave:
             _spawn_task(
@@ -4255,6 +4305,8 @@ def _dispatch_event(
             tags = {str(tag) for tag in raw_tags}
         else:
             tags = {str(raw_tags)}
+        if publish is not None:
+            publish("channel", sender_id, message, tags)
         _spawn_task(
             tg,
             bot.on_channel(sender_id, message, tags),
@@ -4268,6 +4320,8 @@ def _dispatch_event(
         item = parse_item_or_currency(data.get("item"))
         if sender is None or receiver is None:
             return True
+        if publish is not None:
+            publish("tip", sender, receiver, item)
         _spawn_task(
             tg,
             bot.on_tip(sender, receiver, item),
@@ -4283,6 +4337,8 @@ def _dispatch_event(
         _tracker = getattr(bot, "room_tracker", None)
         if _tracker is not None:
             _tracker.move(user.id, position)
+        if publish is not None:
+            publish("user_move", user, position)
         handler = bot.on_user_move
         if getattr(handler, "__func__", None) is not BaseBot.on_user_move:
             _spawn_task(
@@ -4301,6 +4357,8 @@ def _dispatch_event(
                 if u is not None:
                     users.append((u, str(pair[1])))
         seconds_left = _as_int(data.get("seconds_left"), 0)
+        if publish is not None:
+            publish("voice", users, seconds_left)
         _spawn_task(
             tg,
             bot.on_voice_change(users, seconds_left),
@@ -4312,6 +4370,8 @@ def _dispatch_event(
         user_id = str(data.get("user_id", ""))
         conversation_id = str(data.get("conversation_id", ""))
         is_new = bool(data.get("is_new_conversation", False))
+        if publish is not None:
+            publish("message", user_id, conversation_id, is_new)
         _cmd_registry = getattr(bot, "command_registry", None) or commands
         connection = getattr(bot, "highrise", None)
         if connection is not None and _registry_handles(_cmd_registry, "dm"):
@@ -4326,14 +4386,14 @@ def _dispatch_event(
     if event_type == "RoomModeratedEvent":
         duration_raw = data.get("duration")
         duration = None if duration_raw is None else _as_int(duration_raw)
+        moderator = str(data.get("moderatorId", ""))
+        target = str(data.get("targetUserId", ""))
+        action = str(data.get("moderationType", ""))
+        if publish is not None:
+            publish("moderation", moderator, target, action, duration)
         _spawn_task(
             tg,
-            bot.on_moderate(
-                str(data.get("moderatorId", "")),
-                str(data.get("targetUserId", "")),
-                str(data.get("moderationType", "")),
-                duration,
-            ),
+            bot.on_moderate(moderator, target, action, duration),
             bot,
             "RoomModeratedEvent",
         )
@@ -4842,6 +4902,9 @@ async def bot_runner(bot: BaseBot, room_id: str, api_key: str) -> None:
                                     prompts = getattr(bot, "prompts", None)
                                     if isinstance(prompts, PromptManager):
                                         prompts.cancel_all()
+                                    awaiter = getattr(bot, "_awaiter", None)
+                                    if awaiter is not None:
+                                        awaiter.cancel_all()
                                     try:
                                         await highrise._close_session()
                                     finally:
@@ -4865,6 +4928,11 @@ async def bot_runner(bot: BaseBot, room_id: str, api_key: str) -> None:
                         log.warning("WebSocket handshake failed; retrying (attempt %d)", reconnect_attempt)
                     else:
                         log.exception("Bot connection failed; retrying (attempt %d)", reconnect_attempt)
+                finally:
+                    # Hooks may register a new wait while the connection is closing.
+                    awaiter = getattr(bot, "_awaiter", None)
+                    if awaiter is not None:
+                        awaiter.cancel_all()
                 await _sleep_backoff(reconnect_attempt)
                 reconnect_attempt += 1
     finally:
