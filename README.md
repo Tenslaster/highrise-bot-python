@@ -157,7 +157,7 @@ await room.tasks.cancel_key(("emote", user.id))
 ```
 
 Use the same keyed methods on `self.tasks` for jobs you want to keep across
-reconnects, such as polling a radio stream. `self.highrise.connected` reports
+reconnects, such as checkpointing playtime totals. `self.highrise.connected` reports
 whether the current client has an open room socket.
 
 ### Room state and prompts
@@ -260,7 +260,7 @@ The twelve event names are `chat`, `whisper`, `emote`, `reaction`, `user_join`,
 you need the message contents. Pending waits are cancelled when the room
 connection closes. Use quick synchronous functions for predicates and keys.
 
-### Radio jobs and retries
+### Periodic room jobs and retries
 
 `PeriodicJob` runs one callback at a time on a monotonic schedule and skips
 missed ticks. Keep the job on your bot instance so repeated `start()` calls
@@ -268,25 +268,34 @@ reuse the same task. Use `pause()`, `resume()`, and `await stop()` to control it
 The job reports `runs`, `missed_ticks`, and `failures`.
 
 ```python
+from highrise import BaseBot, Error
 from highrise_fast.extras import ChangeDetector, PeriodicJob, RetryPolicy
 
-title_changed = ChangeDetector(key=str.strip)
-retry = RetryPolicy(attempts=3, delay=0.25, max_delay=2)
 
-# In your bot, with read_title() and announce() supplied by your radio integration.
-async def poll_title():
-    title = await retry.run(read_title)
-    if self.highrise.connected and title_changed.update(title):
-        await announce(title)
+class RosterBot(BaseBot):
+    def __init__(self):
+        super().__init__(track_room=False)
 
-self.radio_job = PeriodicJob(5, poll_title)
-self.radio_job.start(self.tasks)
+    async def on_start(self, metadata):
+        room = self.highrise
+        count_changed = ChangeDetector()
+        retry = RetryPolicy(attempts=3, delay=0.25, max_delay=2)
+
+        async def log_room_count():
+            snapshot = await retry.run(room.get_room_users)
+            if isinstance(snapshot, Error):
+                return
+            count = sum(user.id != metadata.user_id for user, _ in snapshot.content)
+            if count_changed.update(count):
+                print(f"Players in the room: {count}")
+
+        self.roster_job = PeriodicJob(15, log_room_count)
+        self.roster_job.start(room.tasks)
 ```
 
 Jobs on `self.tasks` survive reconnects. Use `self.highrise.tasks` for jobs
 that should stop at disconnect. `RetryPolicy` defaults to retrying I/O errors
-and timeouts. Use it for repeat-safe operations such as reading a song title
-or fetching a roster.
+and timeouts. Use it for repeat-safe reads such as fetching a room roster.
 
 ### Playtime, occupancy, and roles
 
@@ -300,7 +309,7 @@ from highrise import Error
 from highrise_fast.extras import AtomicJsonStore, PresenceTimer, RoomOccupancyTrigger
 
 # Initialize once after you have the bot user ID from session metadata.
-options = {"exclude_ids": {metadata.user_id}, "exclude_usernames": {"R0_.YA__", "__R0_Sa"}}
+options = {"exclude_ids": {metadata.user_id}, "exclude_usernames": {"HelperBot"}}
 playtime_file = AtomicJsonStore("state/playtime.json")
 playtime = PresenceTimer(await playtime_file.load(default={}), **options)
 occupancy = RoomOccupancyTrigger(empty_seconds=10, **options)

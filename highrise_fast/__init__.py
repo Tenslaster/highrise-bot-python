@@ -4632,7 +4632,7 @@ def _compute_backoff(attempt: int, base: float = 1.0, cap: float = 60.0, jitter_
 
     attempt 0 => ~1s, 1=>2s, 2=>4s, 3=>8s ... capped at 60s.
     Jitter is ±jitter_ratio (default 20%) to avoid synchronized reconnect storms
-    when running multiple radios.
+    when running multiple bots.
     """
     try:
         exp = base * (2 ** max(0, attempt))

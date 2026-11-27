@@ -322,10 +322,10 @@ class JobAndActionTests(unittest.IsolatedAsyncioTestCase):
             await retry.run(bad)
         bad.assert_awaited_once()
 
-        title = sdk.ChangeDetector(key=str.strip, emit_initial=False)
-        self.assertFalse(title.update(" Track "))
-        self.assertFalse(title.update("Track"))
-        self.assertTrue(title.update("Next"))
+        username = sdk.ChangeDetector(key=str.casefold, emit_initial=False)
+        self.assertFalse(username.update("Player"))
+        self.assertFalse(username.update("PLAYER"))
+        self.assertTrue(username.update("Renamed"))
 
     async def test_cancel_waiting_and_queued_interactions_without_sending_them(self):
         send = AsyncMock()

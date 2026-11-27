@@ -86,7 +86,7 @@ class KeyedTaskTests(unittest.IsolatedAsyncioTestCase):
 
         class Bot(sdk.BaseBot):
             async def on_start(self, metadata):
-                self.tasks.replace("radio", lambda: background(bot_started, bot_stopped))
+                self.tasks.replace("room-stats", lambda: background(bot_started, bot_stopped))
                 self.highrise.tasks.replace(
                     "emotes", lambda: background(room_started, room_stopped)
                 )
