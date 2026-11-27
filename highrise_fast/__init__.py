@@ -156,6 +156,7 @@ from .extras import (
     ThrottledActions,
     TTLCache,
     UserResolver,
+    async_cached,
     chunk_for_chat,
     commands,
     send_long_message,
@@ -260,7 +261,7 @@ except ImportError:  # pragma: no cover - compatibility with older extras
     from .extras import WebAPI as CachedWebAPI  # noqa: F401
 
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 
 __all__ = [
@@ -346,6 +347,7 @@ __all__ = [
     "send_long_message",
     "commands",
     "active_subscriptions",
+    "async_cached",
     "bot_runner",
     "collect_issues",
     "control_runner",
@@ -511,6 +513,7 @@ _STATS: dict[str, int] = {
     "dispatch_dropped": 0,
     "dispatch_queued": 0,
     "chat_flood_dropped": 0,
+    "dm_commands_deduplicated": 0,
 }
 
 _METRICS_MAXLEN = max(0, _env_int("HR_METRICS_MAXLEN", 10_000))
@@ -2589,6 +2592,7 @@ class Highrise:
         self._room_tracker = room_tracker
         self._session_closed = False
         self._session_tasks: TaskManager | None = None
+        self._dm_seen: TTLCache | None = None
 
         self._req_id = count()
 
@@ -2623,6 +2627,8 @@ class Highrise:
         self._session_closed = True
         self.fail_pending()
         self._ff_rids.clear()
+        if self._dm_seen is not None:
+            self._dm_seen.clear()
         if self._session_tasks is not None:
             await self._session_tasks.close()
 
@@ -3757,6 +3763,13 @@ def _has_hook(bot: BaseBot, name: str) -> bool:
     return handler is not None and getattr(handler, "__func__", handler) is not getattr(BaseBot, name)
 
 
+def _registry_handles(registry: Any, source: str) -> bool:
+    handles = getattr(registry, "handles_source", None)
+    if callable(handles):
+        return handles(source)
+    return getattr(registry, "has_commands", True)
+
+
 def active_subscriptions(bot: BaseBot) -> frozenset[str]:
     """Subscription names required by the bot's hooks and room tracker."""
 
@@ -3766,8 +3779,10 @@ def active_subscriptions(bot: BaseBot) -> frozenset[str]:
     if getattr(bot, "enable_prompts", False):
         subs.add("chat")
     registry = getattr(bot, "command_registry", None) or commands
-    if getattr(registry, "has_commands", True):
-        subs.update({"chat", "message"})
+    if _registry_handles(registry, "chat") or _registry_handles(registry, "whisper"):
+        subs.add("chat")
+    if _registry_handles(registry, "dm"):
+        subs.add("message")
 
     for method_name, event_name in _HANDLER_METHODS.items():
         if _has_hook(bot, method_name):
@@ -4065,6 +4080,35 @@ async def _run_internal_tests_async():
     print("=== All Internal Tests Passed ===")
 
 
+async def _route_dm_command(
+    bot: BaseBot, connection: Highrise, user_id: str, conversation_id: str, registry: Any
+) -> None:
+    """Route the latest message for the event sender once per room session."""
+    response = await connection.get_messages(conversation_id)
+    messages = getattr(response, "messages", ())
+    if not messages or bot.highrise is not connection or connection._session_closed:
+        return
+    message = messages[0]
+    if message.sender_id != user_id or user_id == connection.my_id:
+        return
+    if message.conversation_id and message.conversation_id != conversation_id:
+        return
+    if not message.message_id or not message.content.startswith(registry.prefix):
+        return
+
+    if connection._dm_seen is None:
+        connection._dm_seen = TTLCache()
+    key = conversation_id, message.message_id
+    if connection._dm_seen.get(key) is not _EXTRAS_MISSING:
+        _STATS["dm_commands_deduplicated"] += 1
+        return
+    connection._dm_seen.set(key, True, ttl=300)
+    await registry.handle(
+        bot, User(id=user_id, username=user_id), message.content,
+        source="dm", conversation_id=conversation_id,
+    )
+
+
 def _dispatch_event(
     bot: BaseBot,
     bot_id: str,
@@ -4102,7 +4146,7 @@ def _dispatch_event(
         _cmd_registry = getattr(bot, "command_registry", None) or commands
         _prefix = getattr(_cmd_registry, "prefix", "!")
         _handler = bot.on_whisper if whisper else bot.on_chat
-        if message.startswith(_prefix):
+        if message.startswith(_prefix) and getattr(_cmd_registry, "has_commands", True):
             _source = "whisper" if whisper else "chat"
 
             async def _run_command(
@@ -4269,45 +4313,15 @@ def _dispatch_event(
         conversation_id = str(data.get("conversation_id", ""))
         is_new = bool(data.get("is_new_conversation", False))
         _cmd_registry = getattr(bot, "command_registry", None) or commands
-        if getattr(_cmd_registry, "has_commands", True) and getattr(bot, "highrise", None):
-
-            async def _handle_dm_command(
-                _bot=bot, _uid=user_id, _cid=conversation_id, _reg=_cmd_registry
-            ) -> None:
-                """Internal helper for Handle dm command."""
-                try:
-                    resp = await _bot.highrise.get_messages(_cid)
-                    if resp and hasattr(resp, "messages") and resp.messages:
-                        bot_id = getattr(_bot.highrise, "my_id", "")
-                        for msg in reversed(resp.messages):
-                            sender = getattr(msg, "sender_id", "") or getattr(
-                                msg, "user_id", ""
-                            )
-                            if sender == bot_id:
-                                continue
-                            content = getattr(msg, "content", "") or ""
-                            if content.startswith(_reg.prefix):
-                                dummy_user = User(id=_uid, username=_uid)
-                                await _reg.handle(
-                                    _bot,
-                                    dummy_user,
-                                    content,
-                                    source="dm",
-                                    conversation_id=_cid,
-                                )
-                                break
-                except Exception as e:
-                    logging.getLogger("highrise_fast.commands").debug(
-                        "DM command routing failed: %r", e
-                    )
-
-            _spawn_task(tg, _handle_dm_command(), bot, "DMCommand")
-        _spawn_task(
-            tg,
-            bot.on_message(user_id, conversation_id, is_new),
-            bot,
-            "MessageEvent",
-        )
+        connection = getattr(bot, "highrise", None)
+        if connection is not None and _registry_handles(_cmd_registry, "dm"):
+            _spawn_task(
+                tg, _route_dm_command(bot, connection, user_id, conversation_id, _cmd_registry),
+                bot, "DMCommand",
+            )
+        handler = bot.on_message
+        if getattr(handler, "__func__", None) is not BaseBot.on_message:
+            _spawn_task(tg, handler(user_id, conversation_id, is_new), bot, "MessageEvent")
         return True
     if event_type == "RoomModeratedEvent":
         duration_raw = data.get("duration")

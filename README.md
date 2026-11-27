@@ -172,6 +172,10 @@ reply is received. Use `room_tracker.user_count`, `usernames` or
 `get_position(user_id)` for repeated local lookups.
 
 `get_username(user_id)` and `get_anchor(user_id)` read the same local state.
+`get_user_id(username)` does an exact, case-insensitive lookup in that roster.
+`await tracker.wait_for_roster_change(tracker.roster_revision)` waits for
+membership or a username to change. Join and leave events and fresh roster
+snapshots update the revision. Movement alone keeps the same revision.
 `get_nearby(x, z, radius)` works on floor coordinates. A bot that does not
 need the tracker can call `super().__init__(track_room=False)` to skip the
 automatic startup roster read and the tracker’s event subscriptions.
@@ -184,6 +188,33 @@ Set `enable_prompts=True` in `BaseBot.__init__` to subscribe to chat when
 your bot has no chat or whisper hook. Prompts are cancelled on disconnect.
 `DebouncedSaver` coalesces state updates, serializes writes, and flushes the
 latest pending update when you await `stop()`.
+
+### Queued emotes and reactions
+
+`self.actions.emote(emote_id, target_user_id=None)` and
+`self.actions.react(reaction, target_user_id)` return whether the queue
+accepted the action. Chat and whispers, teleports, and interactions have
+independent workers with a shared queue limit. `actions.stats()` reports
+queued, sent, failed, and dropped actions. `await actions.flush()` waits
+for queued actions to finish processing.
+
+### Commands and replies
+
+`CommandRegistry.command()` accepts aliases and optional
+`sources={"chat", "whisper", "dm"}` restrictions. The registry matches
+command names case-insensitively. `get_command(name)` looks up a command
+or alias, and `remove_command(name)` removes the command and its aliases.
+Use `set_permission_checker()` with a sync or async function when you assign
+command ranks. Per-user cooldown storage is bounded.
+
+`await ctx.reply(text)` follows the source of the command.
+`await ctx.reply_private(text)` whispers replies to room commands or uses
+the existing DM conversation. The inbox router checks the latest message's
+sender and deduplicates recent command IDs within a connection.
+
+`chunk_for_chat()` preserves message order across lines.
+`await send_long_message(room, text)` splits and numbers long messages within
+the configured character limit.
 
 ## Web API
 
@@ -247,6 +278,12 @@ attributes. [HTTP Retry-After](https://developer.mozilla.org/en-US/docs/Web/HTTP
 
 `UserResolver(api, maxsize=1024)` bounds the username and ID lookup caches
 independently. `ttl=0` disables those lookup caches.
+
+`@async_cached(ttl=30, maxsize=256)` coalesces equivalent concurrent calls
+to an async function and caches successful results. `@cached()` also accepts
+async functions. Both decorators expose `cache_clear()`.
+`CachedWebAPI` shares concurrent raw JSON GETs with equivalent arguments and
+exposes `invalidate_cache()`.
 
 Stream cursor-based collections with `iter_items`, `iter_users`,
 `iter_rooms`, `iter_posts`, or `iter_grabs`. Each iterator accepts the
