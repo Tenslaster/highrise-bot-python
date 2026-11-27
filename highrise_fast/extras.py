@@ -9,7 +9,7 @@ import logging
 import math
 import time
 import types
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from collections.abc import Callable, Coroutine
 from typing import Any
 
@@ -126,97 +126,48 @@ def _stable_repr(value: Any) -> str:
 
 
 class TTLCache:
-
-    """LRU in-memory cache with expiration and maxsize.
-
-
-
-    Eviction is least-recently-used: keys accessed via get() are moved
-
-    to the end of the insertion-order dict so they survive eviction,
-
-    while stale never-accessed keys are evicted first.
-
-    """
-
-
+    """Bounded least-recently-used cache with monotonic expiry."""
 
     __slots__ = ("_maxsize", "_store")
 
-
-
     def __init__(self, maxsize: int = 1024) -> None:
-
-        """Create a cache holding at most ``maxsize`` entries."""
-
-        self._store: dict[str, tuple[float, Any]] = {}
-
+        if maxsize < 0:
+            raise ValueError("maxsize must be nonnegative")
+        self._store: OrderedDict[str, tuple[float, Any]] = OrderedDict()
         self._maxsize = maxsize
 
-
+    def __len__(self) -> int:
+        return len(self._store)
 
     def get(self, key: str) -> Any:
-
         """Return the cached value, or MISSING if absent or expired."""
-
         item = self._store.get(key)
-
         if item is None:
-
             return MISSING
-
         expires_at, value = item
-
         if time.monotonic() < expires_at:
-
-            self._store[key] = self._store.pop(key)
-
+            self._store.move_to_end(key)
             return value
-
         del self._store[key]
-
         return MISSING
 
-
-
     def set(self, key: str, value: Any, ttl: int = 60) -> None:
-
         """Store a value with a TTL, evicting the LRU entry when full."""
-
-        self._store.pop(key, None)
-
-        if len(self._store) >= self._maxsize:
-
-            try:
-
-                oldest_key = next(iter(self._store))
-
-                self._store.pop(oldest_key)
-
-            except StopIteration:
-
-                pass
-
+        if self._maxsize == 0 or ttl <= 0:
+            self.invalidate(key)
+            return
         self._store[key] = (time.monotonic() + ttl, value)
-
-
+        self._store.move_to_end(key)
+        if len(self._store) > self._maxsize:
+            self._store.popitem(last=False)
 
     def invalidate(self, key: str) -> None:
-
         """Drop a single key."""
-
         self._store.pop(key, None)
 
-
-
     def clear(self) -> None:
-
         """Drop everything."""
-
         self._store.clear()
-
-
-
 
 
 class CachedWebAPI:
@@ -1409,26 +1360,17 @@ commands = CommandRegistry()
 
 
 class RoomTracker:
-
     """Maintains real-time user positions locally via spatial hashing."""
 
-
-
     def __init__(self, cell_size: float = 4.0):
-
-        """Create the grid with a specified cell size."""
-
+        if not math.isfinite(cell_size) or cell_size <= 0:
+            raise ValueError("cell_size must be finite and positive")
         self.cell_size = cell_size
-
         self._grid: dict[tuple[int, int], set[str]] = defaultdict(set)
-
+        self._cells: dict[str, tuple[int, int]] = {}
         self._positions: dict[str, tuple[float, float, float]] = {}
-
         self._users: dict[str, str] = {}
-
         self._anchors: dict[str, tuple[str, int]] = {}
-
-
 
     def replace_roster(self, rows) -> None:
         """Replace the local roster with a complete room snapshot."""
@@ -1436,192 +1378,122 @@ class RoomTracker:
         for user, position in rows:
             snapshot.add(user, position)
         self._grid = snapshot._grid
+        self._cells = snapshot._cells
         self._positions = snapshot._positions
         self._users = snapshot._users
         self._anchors = snapshot._anchors
 
     def _cell(self, x: float, z: float) -> tuple[int, int]:
-
-        """Convert (x, z) coordinates into grid cell indices."""
-
         return (int(x // self.cell_size), int(z // self.cell_size))
 
-
-
-    def add(self, user, position=None):
-
-        """Track a user; position may be None (positionless join)."""
-
+    def add(self, user, position=None) -> None:
+        """Track a user, including joins without a position."""
         self._users[user.id] = user.username
-
         if position:
-
             self.move(user.id, position)
 
-
-
-    def remove(self, user_id: str):
-
-        """Remove a user from users, anchors, positions, and the grid."""
-
+    def remove(self, user_id: str) -> None:
+        """Remove a user's name, anchor, and floor position."""
         self._users.pop(user_id, None)
-
         self._anchors.pop(user_id, None)
+        self.remove_position(user_id)
 
-        pos = self._positions.pop(user_id, None)
-
-        if pos:
-
-            cell = self._cell(pos[0], pos[2])
-
-            if cell in self._grid:
-
-                self._grid[cell].discard(user_id)
-
-                if not self._grid[cell]:
-
-                    del self._grid[cell]
-
-
-
-    def move(self, user_id: str, destination):
-
-        """Update a user's position or anchor; None is a no-op."""
-
+    def move(self, user_id: str, destination) -> None:
+        """Update a user's floor position or anchor."""
         if destination is None:
-
             return
-
         if hasattr(destination, "entity_id"):
-
             self._anchors[user_id] = (destination.entity_id, destination.anchor_ix)
-
             self.remove_position(user_id)
-
-            return
-
-        if hasattr(destination, "x"):
-
-            self._anchors.pop(user_id, None)
-
-            self.remove_position(user_id)
-
+        elif hasattr(destination, "x"):
             x, y, z = destination.x, destination.y, destination.z
-
+            cell = self._cell(x, z)
+            if self._cells.get(user_id) != cell:
+                self.remove_position(user_id)
+                self._cells[user_id] = cell
+                self._grid[cell].add(user_id)
+            self._anchors.pop(user_id, None)
             self._positions[user_id] = (x, y, z)
 
-            self._grid[self._cell(x, z)].add(user_id)
-
-
-
-    def remove_position(self, user_id: str):
-
-        """Drop a user's floor position and clean up their grid cell."""
-
-        pos = self._positions.pop(user_id, None)
-
-        if pos:
-
-            cell = self._cell(pos[0], pos[2])
-
-            if cell in self._grid:
-
-                self._grid[cell].discard(user_id)
-
-                if not self._grid[cell]:
-
-                    del self._grid[cell]
-
-
+    def remove_position(self, user_id: str) -> None:
+        """Drop a floor position and clean up its grid cell."""
+        self._positions.pop(user_id, None)
+        cell = self._cells.pop(user_id, None)
+        if cell is not None:
+            users = self._grid[cell]
+            users.discard(user_id)
+            if not users:
+                del self._grid[cell]
 
     def get_position(self, user_id: str) -> tuple[float, float, float] | None:
-
-        """Returns the user's (x, y, z) position, or None if unknown."""
-
+        """Return the user's floor coordinates, if known."""
         return self._positions.get(user_id)
 
+    def get_anchor(self, user_id: str) -> tuple[str, int] | None:
+        """Return the user's (entity ID, anchor index), if seated at an anchor."""
+        return self._anchors.get(user_id)
 
+    def get_username(self, user_id: str) -> str | None:
+        """Return a user's locally tracked username."""
+        return self._users.get(user_id)
 
     def get_nearby(self, x: float, z: float, radius: float) -> list[str]:
+        """Return floor-positioned user IDs within radius on the XZ plane."""
+        if radius < 0:
+            return []
+        if not math.isfinite(radius):
+            raise ValueError("radius must be finite")
 
-        """User ids within `radius` units of (x, z)."""
-
+        grid = self._grid
         r_cells = math.ceil(radius / self.cell_size)
-
         cx, cz = self._cell(x, z)
+        low_x, high_x = cx - r_cells, cx + r_cells
+        low_z, high_z = cz - r_cells, cz + r_cells
 
-        result = []
-
-        for dx in range(-r_cells, r_cells + 1):
-
-            for dz in range(-r_cells, r_cells + 1):
-
-                for uid in self._grid.get((cx + dx, cz + dz), set()):
-
-                    if uid in self._positions:
-
-                        ux, _, uz = self._positions[uid]
-
-                        if math.hypot(ux - x, uz - z) <= radius:
-
-                            result.append(uid)
-
-        return result
-
-
+        if (2 * r_cells + 1) ** 2 > len(grid):
+            candidates = (
+                grid[cell] for cell in sorted(grid)
+                if low_x <= cell[0] <= high_x and low_z <= cell[1] <= high_z
+            )
+        else:
+            candidates = (
+                grid.get((cell_x, cell_z), ())
+                for cell_x in range(low_x, high_x + 1)
+                for cell_z in range(low_z, high_z + 1)
+            )
+        positions = self._positions
+        nearby = []
+        for users in candidates:
+            for uid in users:
+                ux, _, uz = positions[uid]
+                if math.hypot(ux - x, uz - z) <= radius:
+                    nearby.append(uid)
+        return nearby
 
     def find_empty_spot(
-
         self, center_x: float, center_z: float, radius: float, min_spacing: float = 1.5
-
     ) -> tuple[float, float] | None:
-
         """Find an unoccupied spot near a center, or None after 20 tries."""
-
         import random
 
-
-
         for _ in range(20):
-
             angle = random.uniform(0, 2 * math.pi)
-
-            dist = random.uniform(0, radius)
-
-            x = center_x + dist * math.cos(angle)
-
-            z = center_z + dist * math.sin(angle)
-
-            nearby = self.get_nearby(x, z, min_spacing)
-
-            if not nearby:
-
-                return (x, z)
-
+            distance = random.uniform(0, radius)
+            x = center_x + distance * math.cos(angle)
+            z = center_z + distance * math.sin(angle)
+            if not self.get_nearby(x, z, min_spacing):
+                return x, z
         return None
 
-
-
     @property
-
     def user_count(self) -> int:
-
-        """Returns the number of users in the system."""
-
+        """Return the number of tracked users."""
         return len(self._users)
 
-
-
     @property
-
     def usernames(self) -> dict[str, str]:
-
-        """Returns a copy of the id → username map."""
-
+        """Return a copy of the user ID to username map."""
         return dict(self._users)
-
-
-
 
 
 class _TokenBucket:
@@ -2080,135 +1952,72 @@ async def send_long_message(
 
 
 class DebouncedSaver:
-
-    """Batches file/DB writes. Only saves once per `delay` seconds.
-
-
-
-    Call `stop()` on bot shutdown to flush pending data and cancel
-
-    any in-flight save task.
-
-    """
-
-
+    """Coalesce writes within a delay window and serialize writes in progress."""
 
     def __init__(self, save_func: Callable, delay: float = 3.0):
-
-        """Create a saver that coalesces writes into one per delay window."""
-
         self._save_func = save_func
-
         self._delay = delay
-
         self._task: asyncio.Task | None = None
-
         self._pending: Any = None
-
         self._dirty = False
+        self._lock = asyncio.Lock()
+        self._flush_requested = asyncio.Event()
 
-
-
-    def trigger(self, data: Any):
-
-        """Mark data dirty and schedule the debounced save."""
-
+    def trigger(self, data: Any) -> None:
+        """Schedule the newest data for saving."""
         self._pending = data
-
         self._dirty = True
-
         if self._task is None or self._task.done():
-
             try:
-
-                asyncio.get_running_loop()
-
+                loop = asyncio.get_running_loop()
             except RuntimeError:
+                return
+            self._task = loop.create_task(self._worker())
 
+    async def _worker(self) -> None:
+        while self._dirty:
+            if self._delay > 0 and not self._flush_requested.is_set():
+                try:
+                    await asyncio.wait_for(self._flush_requested.wait(), self._delay)
+                except asyncio.TimeoutError:
+                    pass
+            if not await self._do_save():
                 return
 
-            self._task = asyncio.create_task(self._worker())
-
-
-
-    async def _worker(self):
-
-        """Wait out the delay, then save."""
-
-        try:
-
-            await asyncio.sleep(self._delay)
-
-        except asyncio.CancelledError:
-
-            await self._do_save()
-
-            raise
-
-        await self._do_save()
-
-        self._task = None
-
-
-
-    async def _do_save(self):
-
-        """Save the pending data if dirty."""
-
-        if self._dirty and self._pending is not None:
-
+    async def _do_save(self) -> bool:
+        async with self._lock:
+            if not self._dirty:
+                return True
             data = self._pending
-
             self._dirty = False
-
             try:
-
                 result = self._save_func(data)
-
                 if inspect.isawaitable(result):
-
                     await result
+            except BaseException as exc:
+                # A trigger may have supplied a newer state while saving.
+                if not self._dirty:
+                    self._pending = data
+                    self._dirty = True
+                if not isinstance(exc, Exception):
+                    raise
+                logger.exception("Debounced save failed")
+                return False
+            return True
 
-            except Exception:
-
-                logging.getLogger("highrise_fast.saver").error(
-
-                    "Debounced save failed", exc_info=True
-
-                )
-
-
-
-    async def flush(self):
-
-        """Force-save any pending data immediately."""
-
+    async def flush(self) -> None:
+        """Save the latest pending state immediately, after any active write."""
         await self._do_save()
 
-
-
-    async def stop(self):
-
-        """Cancel any pending save task and flush remaining data."""
-
-        if self._task is not None and not self._task.done():
-
-            self._task.cancel()
-
-            try:
-
-                await self._task
-
-            except asyncio.CancelledError:
-
-                pass
-
-            self._task = None
-
-        await self._do_save()
-
-
-
+    async def stop(self) -> None:
+        """Finish the current write and flush pending state."""
+        self._flush_requested.set()
+        try:
+            if self._task is not None:
+                await asyncio.shield(self._task)
+            await self.flush()
+        finally:
+            self._flush_requested.clear()
 
 
 class PromptManager:

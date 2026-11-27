@@ -70,10 +70,11 @@ import time
 import urllib.parse
 import weakref
 from collections import Counter, deque
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
+from functools import partial
 from inspect import isawaitable, iscoroutine
 from itertools import count
 from typing import Any, Literal
@@ -257,7 +258,7 @@ except ImportError:  # pragma: no cover - compatibility with older extras
     from .extras import WebAPI as CachedWebAPI  # noqa: F401
 
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 
 __all__ = [
@@ -509,10 +510,11 @@ _STATS: dict[str, int] = {
     "chat_flood_dropped": 0,
 }
 
-_LATENCIES_MS: deque[float] = deque(maxlen=10_000)
+_METRICS_MAXLEN = max(0, _env_int("HR_METRICS_MAXLEN", 10_000))
+_LATENCIES_MS: deque[float] = deque(maxlen=min(10_000, _METRICS_MAXLEN))
 
-_LOOP_LAG_MS: deque[float] = deque(maxlen=10_000)
-_GC_PAUSES_MS: deque[float] = deque(maxlen=1_000)
+_LOOP_LAG_MS: deque[float] = deque(maxlen=min(10_000, _METRICS_MAXLEN))
+_GC_PAUSES_MS: deque[float] = deque(maxlen=min(1000, _METRICS_MAXLEN))
 _LOOP_LAG_TASK: asyncio.Task | None = None
 _LOOP_LAG_REFCOUNT: int = 0
 _GC_START_TIME: float | None = None
@@ -527,27 +529,9 @@ _USER_INTERN: weakref.WeakValueDictionary[str, User] = weakref.WeakValueDictiona
 _DISPATCH_MAX_CONCURRENCY: int = _env_int("HR_DISPATCH_MAX_CONCURRENCY", 100)
 _DISPATCH_QUEUE_MAX: int = _env_int("HR_DISPATCH_QUEUE_MAX", 1000)
 _DISPATCH_ACTIVE: int = 0
-_DISPATCH_DROPPED: int = 0
-_DISPATCH_QUEUED: int = 0
+_CHAT_FLOOD_QUEUE: deque[tuple[Any, ...]] = deque(maxlen=max(0, _DISPATCH_QUEUE_MAX))
+_CHAT_DRAIN_WAKEUP: asyncio.Event | None = None
 
-_CHAT_FLOOD_QUEUE: deque[tuple[Any, ...]] = deque(maxlen=_DISPATCH_QUEUE_MAX)
-
-_METRICS_MAXLEN: int = _env_int("HR_METRICS_MAXLEN", 10_000)
-
-def _trim_deques_if_needed() -> None:
-    """Ensure deques don't grow beyond _METRICS_MAXLEN (item 16 fix)."""
-    try:
-        if len(_LATENCIES_MS) > _METRICS_MAXLEN:
-            while len(_LATENCIES_MS) > _METRICS_MAXLEN:
-                _LATENCIES_MS.popleft()
-        if len(_LOOP_LAG_MS) > _METRICS_MAXLEN:
-            while len(_LOOP_LAG_MS) > _METRICS_MAXLEN:
-                _LOOP_LAG_MS.popleft()
-        if len(_GC_PAUSES_MS) > min(1000, _METRICS_MAXLEN):
-            while len(_GC_PAUSES_MS) > min(1000, _METRICS_MAXLEN):
-                _GC_PAUSES_MS.popleft()
-    except Exception:
-        pass
 
 def _dispatch_backpressure_check() -> bool:
     """Return True if dispatch should apply backpressure (too many active handlers)."""
@@ -562,9 +546,8 @@ def _dispatch_dec() -> None:
     global _DISPATCH_ACTIVE
     _DISPATCH_ACTIVE = max(0, _DISPATCH_ACTIVE - 1)
     _STATS["dispatch_active"] = _DISPATCH_ACTIVE
-    _trim_deques_if_needed()
-
-
+    if _CHAT_FLOOD_QUEUE and _CHAT_DRAIN_WAKEUP is not None:
+        _CHAT_DRAIN_WAKEUP.set()
 
 
 def _record_loop_lag(lag_ms: float) -> None:
@@ -870,11 +853,7 @@ def reset_stats() -> None:
     _LOOP_LAG_MS.clear()
     _GC_PAUSES_MS.clear()
     _CHAT_FLOOD_QUEUE.clear()
-    global _DISPATCH_ACTIVE, _DISPATCH_DROPPED, _DISPATCH_QUEUED
-    _DISPATCH_ACTIVE = 0
-    _DISPATCH_DROPPED = 0
-    _DISPATCH_QUEUED = 0
-    _trim_deques_if_needed()
+    _STATS["dispatch_active"] = _DISPATCH_ACTIVE
 
 
 def get_sdk_module():
@@ -2442,7 +2421,7 @@ class BaseBot:
     webapi: WebAPI
     metrics: Metrics
     tasks: TaskManager
-    room_tracker: RoomTracker
+    room_tracker: RoomTracker | None
     actions: ThrottledActions
     prompts: PromptManager
 
@@ -2456,11 +2435,12 @@ class BaseBot:
         validation_mode: str | None = None,
         on_invalid: str | None = None,
         invalid_warn_cooldown: float | None = None,
+        track_room: bool = True,
     ) -> None:
         """Initialize the instance."""
         self.metrics = Metrics()
         self.tasks = TaskManager()
-        self.room_tracker = RoomTracker()
+        self.room_tracker = RoomTracker() if track_room else None
         self.prompts = PromptManager()
         self.actions = ThrottledActions(self)
 
@@ -3229,6 +3209,7 @@ class WebAPI:
         *,
         timeout: Any | None = None,
         cache_ttl: int | None = None,
+        cache_size: int = 1024,
     ) -> None:
         """Initialize the instance."""
         _ensure_aiohttp()
@@ -3248,7 +3229,11 @@ class WebAPI:
             self.timeout = timeout
 
         self._session: Any = None
-        self._cache = TTLCache()
+        self._cache = TTLCache(maxsize=cache_size)
+        self._cache_hits = 0
+        self._cache_misses = 0
+        self._coalesced_reads = 0
+        self._http_requests = 0
         self._inflight: dict[str, asyncio.Task[Any]] = {}
         self._requests: set[asyncio.Task[Any]] = set()
 
@@ -3305,41 +3290,49 @@ class WebAPI:
 
         hit = self._cache.get(endpoint)
         if hit is not _EXTRAS_MISSING:
+            self._cache_hits += 1
             return hit
 
+        self._cache_misses += 1
         task = self._inflight.get(endpoint)
         if task is None:
-            task = asyncio.create_task(self._fetch_cached(endpoint, ttl))
+            task = asyncio.create_task(self._fetch(endpoint))
             self._inflight[endpoint] = task
             self._requests.add(task)
-            task.add_done_callback(self._request_done)
+            task.add_done_callback(partial(self._request_done, endpoint, ttl))
+        else:
+            self._coalesced_reads += 1
         return await asyncio.shield(task)
 
     async def _fetch(self, endpoint: str) -> _WebPayload:
         session = await self._get_session()
 
+        self._http_requests += 1
         async with session.get(f"{self.url}{endpoint}") as response:
             payload = await response.read()
             if response.status == 200:
                 return _WebPayload(loads_json(payload))
             raise ResponseError(payload.decode("utf-8", errors="replace"))
 
-    async def _fetch_cached(self, endpoint: str, ttl: int) -> Any:
-        task = asyncio.current_task()
-        try:
-            result = await self._fetch(endpoint)
-            if self._inflight.get(endpoint) is task:
-                self._cache.set(endpoint, result, ttl)
-            return result
-        finally:
-            if self._inflight.get(endpoint) is task:
-                self._inflight.pop(endpoint, None)
-
-    def _request_done(self, task: asyncio.Task[Any]) -> None:
+    def _request_done(self, endpoint: str, ttl: int, task: asyncio.Task[Any]) -> None:
         self._requests.discard(task)
-        if not task.cancelled():
-            # Every waiting caller can be cancelled before the shared request finishes.
-            task.exception()
+        # Retrieve the exception even if every caller has stopped waiting.
+        successful = not task.cancelled() and task.exception() is None
+        if self._inflight.get(endpoint) is task:
+            self._inflight.pop(endpoint)
+            if successful:
+                self._cache.set(endpoint, task.result(), ttl)
+
+    def cache_info(self) -> dict[str, int]:
+        """Return per-client cache, shared-read, and outgoing HTTP request counters."""
+        return {
+            "hits": self._cache_hits,
+            "misses": self._cache_misses,
+            "coalesced": self._coalesced_reads,
+            "http_requests": self._http_requests,
+            "entries": len(self._cache),
+            "inflight": len(self._requests),
+        }
 
     def invalidate_cache(self, endpoint: str | None = None) -> None:
         """Invalidate cached WebAPI responses."""
@@ -3592,6 +3585,62 @@ class WebAPI:
         )
 
 
+    async def _iter_public(
+        self,
+        fetch: Callable[..., Awaitable[Any]],
+        collection: str,
+        *,
+        page_size: int = 20,
+        max_items: int | None = None,
+        starts_after: str | None = None,
+        **filters: Any,
+    ) -> AsyncIterator[Any]:
+        if page_size < 1 or (max_items is not None and max_items < 0):
+            raise ValueError("page_size must be positive and max_items nonnegative")
+        cursor = starts_after
+        seen = {cursor}
+        remaining = max_items
+        while remaining is None or remaining > 0:
+            limit = page_size if remaining is None else min(page_size, remaining)
+            page = await fetch(starts_after=cursor, limit=limit, **filters)
+            rows = getattr(page, collection) or ()
+            if not rows:
+                return
+            next_cursor = page.last_id
+            if next_cursor and next_cursor in seen:
+                return
+            for row in rows:
+                yield row
+                if remaining is not None:
+                    remaining -= 1
+                    if remaining == 0:
+                        return
+            if not next_cursor:
+                return
+            seen.add(next_cursor)
+            cursor = next_cursor
+
+    def iter_items(self, **options: Any) -> AsyncIterator[Any]:
+        """Stream public items with get_items filters, page_size, and max_items."""
+        return self._iter_public(self.get_items, "items", **options)
+
+    def iter_users(self, **options: Any) -> AsyncIterator[Any]:
+        """Stream public users with get_users filters, page_size, and max_items."""
+        return self._iter_public(self.get_users, "users", **options)
+
+    def iter_rooms(self, **options: Any) -> AsyncIterator[Any]:
+        """Stream public rooms with get_rooms filters, page_size, and max_items."""
+        return self._iter_public(self.get_rooms, "rooms", **options)
+
+    def iter_posts(self, **options: Any) -> AsyncIterator[Any]:
+        """Stream public posts with get_posts filters, page_size, and max_items."""
+        return self._iter_public(self.get_posts, "posts", **options)
+
+    def iter_grabs(self, **options: Any) -> AsyncIterator[Any]:
+        """Stream public grabs with get_grabs filters, page_size, and max_items."""
+        return self._iter_public(self.get_grabs, "grabs", **options)
+
+
 _HANDLER_METHODS: dict[str, str] = {
     "on_chat": "chat",
     "on_whisper": "chat",
@@ -3623,6 +3672,11 @@ _EVENT_TO_SUBSCRIPTION: dict[str, str] = {
 }
 
 
+def _has_hook(bot: BaseBot, name: str) -> bool:
+    handler = getattr(bot, name, None)
+    return handler is not None and getattr(handler, "__func__", handler) is not getattr(BaseBot, name)
+
+
 def active_subscriptions(bot: BaseBot) -> frozenset[str]:
     """Subscription names required by the bot's hooks and room tracker."""
 
@@ -3634,11 +3688,7 @@ def active_subscriptions(bot: BaseBot) -> frozenset[str]:
         subs.update({"chat", "message"})
 
     for method_name, event_name in _HANDLER_METHODS.items():
-        base_handler = getattr(BaseBot, method_name, None)
-
-        bot_handler = getattr(type(bot), method_name, None)
-
-        if bot_handler is not None and bot_handler is not base_handler:
+        if _has_hook(bot, method_name):
             subs.add(event_name)
 
     return frozenset(subs)
@@ -3717,11 +3767,9 @@ def _spawn_task(
     Returns True if spawned, False if dropped due to backpressure.
     Tracks active count for dispatcher backpressure metrics.
     """
-    global _DISPATCH_DROPPED
     if _dispatch_backpressure_check():
         if iscoroutine(result):
             result.close()
-        _DISPATCH_DROPPED += 1
         _STATS["dispatch_dropped"] += 1
         log.debug("Dispatcher backpressure: dropping %s (active=%d >= max=%d)", event_type, _DISPATCH_ACTIVE, _DISPATCH_MAX_CONCURRENCY)
         return False
@@ -3748,7 +3796,6 @@ def _spawn_task(
         # A closed/dead TaskGroup (e.g. right after a reconnect) used to fail
         # here with only a DEBUG line, so the event vanished while the receive
         # loop still counted it as handled. Count it as a real drop.
-        _DISPATCH_DROPPED += 1
         _STATS["dispatch_dropped"] += 1
         log.warning(
             "Failed to spawn %s handler; event dropped", event_type, exc_info=True
@@ -3943,9 +3990,10 @@ def _dispatch_event(
     data: dict[str, Any],
     tg: TaskGroup,
     subscriptions: frozenset[str] | None = None,
+    *,
+    buffered: bool = False,
 ) -> bool:
     """Dispatch a validated event to the matching bot handler."""
-    global _DISPATCH_QUEUED
     if subscriptions is not None:
         if not isinstance(event_type, str):
             return False
@@ -3953,18 +4001,6 @@ def _dispatch_event(
         if needed is not None and needed not in subscriptions:
             return False
     if event_type == "ChatEvent":
-        if _dispatch_backpressure_check():
-            if len(_CHAT_FLOOD_QUEUE) >= _CHAT_FLOOD_QUEUE.maxlen:
-                _STATS["chat_flood_dropped"] += 1
-                log.warning(
-                    "Chat flood queue full (%d); oldest buffered chat event dropped",
-                    _CHAT_FLOOD_QUEUE.maxlen,
-                )
-            _CHAT_FLOOD_QUEUE.append((bot, bot_id, event_type, data, tg, time.monotonic()))
-            _STATS["dispatch_queued"] += 1
-            _DISPATCH_QUEUED = len(_CHAT_FLOOD_QUEUE)
-            log.debug("Chat flood buffering: queued (size=%d active=%d)", len(_CHAT_FLOOD_QUEUE), _DISPATCH_ACTIVE)
-            return True
         user = parse_user(data.get("user"))
         if user is None or user.id == bot_id:
             return True
@@ -3972,6 +4008,14 @@ def _dispatch_event(
         whisper = bool(data.get("whisper", False))
         _prompts = getattr(bot, "prompts", None)
         if _prompts is not None and _prompts.resolve(user.id, message):
+            return True
+        if not buffered and (_CHAT_FLOOD_QUEUE or _dispatch_backpressure_check()):
+            if len(_CHAT_FLOOD_QUEUE) >= _CHAT_FLOOD_QUEUE.maxlen:
+                _STATS["chat_flood_dropped"] += 1
+            _CHAT_FLOOD_QUEUE.append((bot, bot_id, event_type, data, tg, time.monotonic()))
+            _STATS["dispatch_queued"] = len(_CHAT_FLOOD_QUEUE)
+            if _CHAT_DRAIN_WAKEUP is not None:
+                _CHAT_DRAIN_WAKEUP.set()
             return True
         _cmd_registry = getattr(bot, "command_registry", None) or commands
         _prefix = getattr(_cmd_registry, "prefix", "!")
@@ -4048,12 +4092,14 @@ def _dispatch_event(
         _tracker = getattr(bot, "room_tracker", None)
         if _tracker is not None:
             _tracker.add(user, position)
-        _spawn_task(
-            tg,
-            bot.on_user_join(user, position),
-            bot,
-            "UserJoinedEvent",
-        )
+        handler = bot.on_user_join
+        if getattr(handler, "__func__", None) is not BaseBot.on_user_join:
+            _spawn_task(
+                tg,
+                handler(user, position),
+                bot,
+                "UserJoinedEvent",
+            )
         return True
     if event_type == "UserLeftEvent":
         user = parse_user(data.get("user"))
@@ -4062,12 +4108,14 @@ def _dispatch_event(
         _tracker = getattr(bot, "room_tracker", None)
         if _tracker is not None:
             _tracker.remove(user.id)
-        _spawn_task(
-            tg,
-            bot.on_user_leave(user),
-            bot,
-            "UserLeftEvent",
-        )
+        handler = bot.on_user_leave
+        if getattr(handler, "__func__", None) is not BaseBot.on_user_leave:
+            _spawn_task(
+                tg,
+                handler(user),
+                bot,
+                "UserLeftEvent",
+            )
         return True
     if event_type == "ChannelEvent":
         sender_id = str(data.get("sender_id", ""))
@@ -4109,12 +4157,14 @@ def _dispatch_event(
         _tracker = getattr(bot, "room_tracker", None)
         if _tracker is not None:
             _tracker.move(user.id, position)
-        _spawn_task(
-            tg,
-            bot.on_user_move(user, position),
-            bot,
-            "UserMovedEvent",
-        )
+        handler = bot.on_user_move
+        if getattr(handler, "__func__", None) is not BaseBot.on_user_move:
+            _spawn_task(
+                tg,
+                handler(user, position),
+                bot,
+                "UserMovedEvent",
+            )
         return True
     if event_type == "VoiceEvent":
         raw_users = data.get("users", []) or []
@@ -4457,68 +4507,55 @@ def _discard_buffered_chat(tg: TaskGroup) -> None:
         _STATS["dispatch_queued"] = len(buffered)
 
 
-async def _drain_chat_flood_queue():
-    """Background worker draining buffered ChatEvents with rate limiting (item 14)."""
+async def _drain_chat_flood_queue(wakeup: asyncio.Event) -> None:
+    """Dispatch buffered chat once a handler slot opens."""
     while True:
-        try:
-            if not _CHAT_FLOOD_QUEUE:
-                await asyncio.sleep(0.05)
-                continue
-            if _dispatch_backpressure_check():
-                await asyncio.sleep(0.05)
-                continue
+        await wakeup.wait()
+        wakeup.clear()
+        while _CHAT_FLOOD_QUEUE and not _dispatch_backpressure_check():
             bot, bot_id, event_type, data, tg, enqueued_at = _CHAT_FLOOD_QUEUE.popleft()
             _STATS["dispatch_queued"] = len(_CHAT_FLOOD_QUEUE)
             try:
-                if not _dispatch_event(bot, bot_id, event_type, data, tg, None):
-                    _STATS["dispatch_dropped"] += 1
-                    log.warning(
-                        "Buffered chat event could not be re-dispatched "
-                        "(queued %.2fs ago)",
-                        time.monotonic() - enqueued_at,
-                    )
+                _dispatch_event(bot, bot_id, event_type, data, tg, buffered=True)
             except Exception:
                 _STATS["dispatch_dropped"] += 1
-                log.warning("Drain dispatch failed", exc_info=True)
-            await asyncio.sleep(0.02)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            log.debug("Chat flood drain loop error", exc_info=True)
-            await asyncio.sleep(0.1)
+                log.warning("Buffered chat dispatch failed after %.2fs",
+                            time.monotonic() - enqueued_at, exc_info=True)
+            if _CHAT_FLOOD_QUEUE:
+                await asyncio.sleep(0.02)
 
 
 _CHAT_DRAIN_TASK: asyncio.Task | None = None
 _CHAT_DRAIN_REFCOUNT: int = 0
 
+
 def start_chat_drain_task() -> asyncio.Task | None:
-    global _CHAT_DRAIN_TASK, _CHAT_DRAIN_REFCOUNT
-    _CHAT_DRAIN_REFCOUNT += 1
-    if _CHAT_DRAIN_TASK is not None and not _CHAT_DRAIN_TASK.done():
-        return _CHAT_DRAIN_TASK
+    global _CHAT_DRAIN_TASK, _CHAT_DRAIN_REFCOUNT, _CHAT_DRAIN_WAKEUP
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return None
-    _CHAT_DRAIN_TASK = loop.create_task(_drain_chat_flood_queue())
-    _CHAT_DRAIN_TASK.set_name("highrise_fast-chat-drain")
+    _CHAT_DRAIN_REFCOUNT += 1
+    if _CHAT_DRAIN_TASK is not None and not _CHAT_DRAIN_TASK.done():
+        return _CHAT_DRAIN_TASK
+    wakeup = _CHAT_DRAIN_WAKEUP = asyncio.Event()
+    if _CHAT_FLOOD_QUEUE:
+        wakeup.set()
+    _CHAT_DRAIN_TASK = loop.create_task(
+        _drain_chat_flood_queue(wakeup), name="highrise_fast-chat-drain"
+    )
     return _CHAT_DRAIN_TASK
 
 
 async def stop_chat_drain_task() -> None:
-    global _CHAT_DRAIN_TASK, _CHAT_DRAIN_REFCOUNT
-    if _CHAT_DRAIN_REFCOUNT > 0:
-        _CHAT_DRAIN_REFCOUNT -= 1
-    if _CHAT_DRAIN_REFCOUNT > 0:
+    global _CHAT_DRAIN_TASK, _CHAT_DRAIN_REFCOUNT, _CHAT_DRAIN_WAKEUP
+    _CHAT_DRAIN_REFCOUNT = max(0, _CHAT_DRAIN_REFCOUNT - 1)
+    if _CHAT_DRAIN_REFCOUNT or _CHAT_DRAIN_TASK is None:
         return
-    if _CHAT_DRAIN_TASK is None:
-        return
-    _CHAT_DRAIN_TASK.cancel()
-    try:
-        await _CHAT_DRAIN_TASK
-    except asyncio.CancelledError:
-        pass
-    _CHAT_DRAIN_TASK = None
+    task, _CHAT_DRAIN_TASK = _CHAT_DRAIN_TASK, None
+    _CHAT_DRAIN_WAKEUP = None
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
 
 
 async def throttler(drops: int = 5, drop_recharge: float = 5.0):
@@ -4637,7 +4674,6 @@ async def bot_runner(bot: BaseBot, room_id: str, api_key: str) -> None:
         bot.tasks = TaskManager()
     start_loop_lag_monitor(0.1)
     start_chat_drain_task()
-    _trim_deques_if_needed()
     reconnect_attempt = 0
     first_session = True
     throttling = throttler(5, 5)

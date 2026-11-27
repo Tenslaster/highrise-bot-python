@@ -150,8 +150,15 @@ is true. A successful later `get_room_users()` refreshes the tracker as the
 reply is received. Use `room_tracker.user_count`, `usernames` or
 `get_position(user_id)` for repeated local lookups.
 
+`get_username(user_id)` and `get_anchor(user_id)` read the same local state.
+`get_nearby(x, z, radius)` works on floor coordinates. A bot that does not
+need the tracker can call `super().__init__(track_room=False)` to skip the
+automatic startup roster read and the tracker’s event subscriptions.
+
 The SDK also exposes `self.actions` for throttled actions, `self.prompts` to
 await user replies, and `CommandRegistry` for decorated commands.
+`DebouncedSaver` coalesces state updates, serializes writes, and flushes the
+latest pending update when you await `stop()`.
 
 ## Web API
 
@@ -201,6 +208,21 @@ Cached responses are shared objects. Treat them as read-only. Set
 `cache_ttl=0` for fresh reads, or use `invalidate_cache()` to refresh cached
 data. HTTP failures surface as `ResponseError` and can be retried by the
 caller.
+
+`WebAPI(cache_size=256)` caps retained responses. `cache_size=0` keeps
+concurrent request sharing with a positive TTL and stores zero responses
+after each request completes. Use `api.cache_info()` to inspect cache hits,
+misses, shared reads, and outgoing requests.
+
+Stream cursor-based collections with `iter_items`, `iter_users`,
+`iter_rooms`, `iter_posts`, or `iter_grabs`. Each iterator accepts the
+corresponding `get_*` filters plus `page_size` and `max_items`. [Web API pagination](https://create.highrise.game/learn/web-api/general/overview)
+
+```python
+# Inside an async function with a WebAPI client
+async for item in api.iter_items(category="hat", page_size=20, max_items=60):
+    print(item.item_id, item.item_name)
+```
 
 ## Configuration
 
